@@ -117,7 +117,8 @@ def fetch_nasa_power_monthly(lat, lon, start_year=2000, end_year=None):
 
 def fetch_openweather_onecall(lat, lon, api_key):
     """Fetch OpenWeather One Call (current + daily forecast)."""
-    url = "https://api.openweathermap.org/data/3.0/onecall" # Using 3.0 endpoint
+    # FIX: Changed endpoint from 3.0 to 2.5, which is compatible with most free API keys.
+    url = "https://api.openweathermap.org/data/2.5/onecall" 
     params = {"lat": lat, "lon": lon, "exclude": "minutely,hourly,alerts", "units": "metric", "appid": api_key}
     r = requests.get(url, params=params, timeout=20)
     r.raise_for_status()
