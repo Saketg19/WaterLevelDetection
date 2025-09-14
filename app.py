@@ -411,6 +411,11 @@ with tab_location:
                         
                         fig7 = px.line(pred_df, x='Date', y='Predicted_Water_Level_m', title="7-Day Predicted Groundwater Level", markers=True)
                         st.plotly_chart(fig7, use_container_width=True)
+            except requests.exceptions.HTTPError as e:
+                if e.response.status_code == 401:
+                    st.error("OpenWeather API Error: Unauthorized (401). Please check that your API key is correct and has been activated in your OpenWeather account. New keys can take a few hours to become active.")
+                else:
+                    st.error(f"An HTTP error occurred: {e}")
             except Exception as e:
                 st.error(f"An error occurred during forecast fetch/prediction: {e}")
 
