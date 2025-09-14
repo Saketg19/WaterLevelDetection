@@ -194,14 +194,10 @@ with tab_main:
     c4.markdown(f"**Status:** {status}")
 
     st.subheader("📈 Groundwater Level Trend (DWLR Data)")
-    # --- Advanced Plot ---
     fig = go.Figure()
-    # Water Level Line
     fig.add_trace(go.Scatter(x=filtered_df['Date'], y=filtered_df['Water_Level_m'], mode='lines', name='Water Level (m)', line=dict(color='blue')))
-    # 7-day Rolling Average
     fig.add_trace(go.Scatter(x=filtered_df['Date'], y=filtered_df['Water_Level_ma7'], mode='lines', name='7-day Rolling Average', line=dict(color='red', dash='dash')))
     
-    # Threshold Lines
     fig.add_hline(y=5, line_width=2, line_dash="solid", line_color="green", annotation_text="Safe (>5m)", annotation_position="top right")
     fig.add_hline(y=3, line_width=2, line_dash="solid", line_color="orange", annotation_text="Semi-Critical (3-5m)", annotation_position="bottom right")
     fig.add_hline(y=2, line_width=2, line_dash="solid", line_color="red", annotation_text="Critical (2-3m)", annotation_position="bottom right")
@@ -219,28 +215,45 @@ with tab_main:
     # --- Machine Learning Section ---
     st.header("⚙️ Machine Learning Model Training")
 
-    models = {
+    # Categorize models
+    tree_based_models = {
         "Random Forest": RandomForestRegressor(random_state=42),
         "Gradient Boosting": GradientBoostingRegressor(random_state=42),
         "XGBoost": xgb.XGBRegressor(random_state=42),
         "AdaBoost Regressor": AdaBoostRegressor(random_state=42),
         "Extra Trees": ExtraTreesRegressor(random_state=42),
         "Decision Tree": DecisionTreeRegressor(random_state=42),
+    }
+
+    linear_models = {
         "Linear Regression": LinearRegression(),
         "Lasso": Lasso(random_state=42),
         "Ridge": Ridge(random_state=42),
         "Elastic Net": ElasticNet(random_state=42),
         "Bayesian Ridge": BayesianRidge(),
+    }
+
+    instance_based_models = {
         "K-Neighbors Regressor": KNeighborsRegressor(),
         "SVR": SVR()
     }
+
+    # Combined dictionary for easy lookup
+    all_models = {**tree_based_models, **linear_models, **instance_based_models}
     
-    model_choice = st.selectbox("Select Model", list(models.keys()))
+    model_categories = {
+        "Tree-Based Models": tree_based_models,
+        "Linear Models": linear_models,
+        "Instance-Based & Neural": instance_based_models
+    }
+
+    category_choice = st.selectbox("Select Model Category", list(model_categories.keys()))
+    
+    models_in_category = model_categories[category_choice]
+    model_choice = st.selectbox("Select Model", list(models_in_category.keys()))
 
     possible_features = [col for col in df.columns if col not in ['Date', 'Water_Level_m']]
-    default_features = [
-        'Temperature_C', 'Rainfall_mm', 'Year', 'Month', 'DayOfYear'
-    ]
+    default_features = ['Temperature_C', 'Rainfall_mm', 'Year', 'Month', 'DayOfYear']
     selected_features = st.multiselect("Select Features for Training", possible_features, default=[f for f in default_features if f in possible_features])
     
     test_size_main = st.slider("Test set size (%) for training", 10, 40, 20, key="main_test_size")
@@ -255,10 +268,9 @@ with tab_main:
                 X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=test_size_main/100.0, random_state=42)
                 
                 scaler = StandardScaler().fit(X_train)
-                X_train_s = scaler.transform(X_train)
-                X_test_s = scaler.transform(X_test)
+                X_train_s, X_test_s = scaler.transform(X_train), scaler.transform(X_test)
                 
-                model = models[model_choice]
+                model = all_models[model_choice]
                 model.fit(X_train_s, y_train)
                 
                 st.session_state['main_model'] = model
@@ -266,9 +278,7 @@ with tab_main:
                 st.session_state['main_features'] = selected_features
                 
                 ypred = model.predict(X_test_s)
-                r2 = r2_score(y_test, ypred)
-                rmse = np.sqrt(mean_squared_error(y_test, ypred))
-                mae = mean_absolute_error(y_test, ypred)
+                r2, rmse, mae = r2_score(y_test, ypred), np.sqrt(mean_squared_error(y_test, ypred)), mean_absolute_error(y_test, ypred)
                 
                 st.success(f"Model '{model_choice}' trained successfully!")
                 st.metric("Test R² Score", f"{r2:.3f}")
@@ -289,10 +299,12 @@ with tab_main:
             input_data[feature] = st.number_input(f"Enter value for {feature}", value=df[feature].mean())
 
         if st.button("Predict Groundwater Level"):
-            input_data['Year'] = pred_date.year
-            input_data['Month'] = pred_date.month
-            input_data['Day'] = pred_date.day
-            input_data['DayOfYear'] = pred_date.timetuple().tm_yday
+            input_data.update({
+                'Year': pred_date.year,
+                'Month': pred_date.month,
+                'Day': pred_date.day,
+                'DayOfYear': pred_date.timetuple().tm_yday
+            })
             
             if 'Water_Level_lag1' in st.session_state['main_features']:
                 input_data['Water_Level_lag1'] = df['Water_Level_m'].iloc[-1]
@@ -304,17 +316,12 @@ with tab_main:
             pred_df = pd.DataFrame([input_data])[st.session_state['main_features']]
             
             pred_scaled = st.session_state['main_scaler'].transform(pred_df)
-            prediction = st.session_state['main_model'].predict(pred_scaled)
+            prediction_value = st.session_state['main_model'].predict(pred_scaled)[0]
             
-            prediction_value = prediction[0]
-            if prediction_value > 5:
-                status = "Safe ✅"
-            elif 3 < prediction_value <= 5:
-                status = "Semi-Critical ⚠️"
-            elif 2 < prediction_value <= 3:
-                status = "Critical ❗"
-            else:
-                status = "Over-exploited ❌"
+            if prediction_value > 5: status = "Safe ✅"
+            elif 3 < prediction_value <= 5: status = "Semi-Critical ⚠️"
+            elif 2 < prediction_value <= 3: status = "Critical ❗"
+            else: status = "Over-exploited ❌"
             
             st.success(f"Predicted Water Level for {pred_date}: **{prediction_value:.3f} m**")
             st.metric(label="Predicted Status", value=status)
