@@ -153,9 +153,8 @@ def project_future_climate_from_monthly_climatology(base_monthly_dict, start_dat
         rows.append({"Date": d, "Temperature_C": temp_proj, "Rainfall_mm": rain_proj})
     return pd.DataFrame(rows)
 
-# NEW: Separate function for daily autoregressive prediction
 def autoregressive_predict_daily(future_weather_df, model, scaler, features, initial_lags, history):
-    """Generates daily predictions autoregressively for the 7-day forecast."""
+    """Generates daily predictions autoregressively, using a proper historical seed."""
     predictions = []
     prediction_history = list(history)
     last_w1 = initial_lags['w1']
@@ -167,36 +166,6 @@ def autoregressive_predict_daily(future_weather_df, model, scaler, features, ini
         rain = row['Rainfall_mm']
         last_w7 = prediction_history.pop(0)
         
-        feature_values = build_reduced_feature_row(temp, rain, dt, last_w1, last_w7, last_r1)
-        feature_df = pd.DataFrame([feature_values])
-        
-        X_pred_s = scaler.transform(feature_df[features])
-        prediction = model.predict(X_pred_s)[0]
-        
-        result = {'Date': dt, 'Temperature_C': temp, 'Rainfall_mm': rain, 'Predicted_Water_Level_m': prediction}
-        predictions.append(result)
-        
-        last_w1, last_r1 = prediction, rain
-        prediction_history.append(prediction)
-
-    return pd.DataFrame(predictions)
-
-# NEW: Separate function for monthly autoregressive prediction
-def autoregressive_predict_monthly(future_weather_df, model, scaler, features, initial_lags, monthly_history):
-    """Generates monthly predictions autoregressively for the long-term projection."""
-    predictions = []
-    # For monthly, we assume lag7 is roughly two months ago, simplifying the logic.
-    # A more complex model might use a 7-month lag.
-    prediction_history = list(monthly_history) 
-    last_w1 = initial_lags['w1']
-    last_r1 = initial_lags['r1']
-
-    for _, row in future_weather_df.iterrows():
-        dt = row['Date']
-        temp = row['Temperature_C']
-        rain = row['Rainfall_mm']
-        last_w7 = prediction_history.pop(0)
-
         feature_values = build_reduced_feature_row(temp, rain, dt, last_w1, last_w7, last_r1)
         feature_df = pd.DataFrame([feature_values])
         
@@ -353,6 +322,13 @@ with tab_location:
                     rain_monthly = df.groupby(df['Date'].dt.month)['Rainfall_mm'].mean().to_dict()
                     base_monthly = {"Temperature_C": temp_monthly, "Rainfall_mm": rain_monthly}
                 
+                # FIX: Ensure all 12 months are present in the climatology and have valid, non-null numbers.
+                for month in range(1, 13):
+                    if pd.isna(base_monthly["Temperature_C"].setdefault(month, 20.0)):
+                        base_monthly["Temperature_C"][month] = 20.0
+                    if pd.isna(base_monthly["Rainfall_mm"].setdefault(month, 50.0)):
+                        base_monthly["Rainfall_mm"][month] = 50.0
+
                 st.session_state['base_monthly'] = base_monthly
                 reduced_features = ['Temperature_C', 'Rainfall_mm', 'Year', 'Month', 'DayOfYear', 'Water_Level_lag1', 'Water_Level_lag7', 'Rainfall_lag1']
                 X_all, y_all = df[reduced_features], df['Water_Level_m']
@@ -369,12 +345,10 @@ with tab_location:
                 r2, rmse, mae = r2_score(y_test, ypred), np.sqrt(mean_squared_error(y_test, ypred)), mean_absolute_error(y_test, ypred)
                 st.success(f"Model trained — Test R2: {r2:.3f}, RMSE: {rmse:.3f}, MAE: {mae:.3f}")
                 
-                df_monthly = df.set_index('Date').resample('M').mean().reset_index()
                 st.session_state.update({
                     'global_last_water_lag1': df['Water_Level_m'].iloc[-1],
                     'global_last_rain_lag1': df['Rainfall_mm'].iloc[-1],
                     'daily_history': df['Water_Level_m'].iloc[-7:].tolist(),
-                    'monthly_history': df_monthly['Water_Level_m'].iloc[-7:].tolist()
                 })
 
     st.markdown("---")
@@ -410,14 +384,18 @@ with tab_location:
         else:
             with st.spinner(f"Generating {proj_years}-year projection..."):
                 base_monthly, start_dt = st.session_state.get('base_monthly'), datetime.now()
-                proj_df = project_future_climate_from_monthly_climatology(base_monthly, start_dt, proj_years, annual_temp_trend, annual_rain_trend)
+                proj_monthly_df = project_future_climate_from_monthly_climatology(base_monthly, start_dt, proj_years, annual_temp_trend, annual_rain_trend)
                 
+                proj_monthly_df.set_index('Date', inplace=True)
+                daily_index = pd.date_range(start=proj_monthly_df.index.min(), end=proj_monthly_df.index.max(), freq='D')
+                proj_daily_df = proj_monthly_df.reindex(daily_index).interpolate(method='linear').reset_index().rename(columns={'index': 'Date'})
+
                 initial_lags = {'w1': st.session_state.get('global_last_water_lag1'), 'r1': st.session_state.get('global_last_rain_lag1')}
-                pred_input = autoregressive_predict_monthly(proj_df, st.session_state['reduced_model'], st.session_state['reduced_scaler'], st.session_state['reduced_features'], initial_lags, st.session_state['monthly_history'])
+                pred_input = autoregressive_predict_daily(proj_daily_df, st.session_state['reduced_model'], st.session_state['reduced_scaler'], st.session_state['reduced_features'], initial_lags, st.session_state['daily_history'])
 
                 if bootstrap_enabled:
                     st.info(f"Running {n_boot} bootstrap iterations...")
-                    Xp_s = st.session_state['reduced_scaler'].transform(pred_input.drop(columns=['Date']))
+                    Xp_s = st.session_state['reduced_scaler'].transform(pred_input[st.session_state['reduced_features']])
                     X_train, y_train = st.session_state['X_train'], st.session_state['y_train']
                     mean, lower, upper = bootstrap_predict(RandomForestRegressor, st.session_state['reduced_model'].get_params(), X_train, y_train, Xp_s, n_boot)
                     pred_input.update({'Pred_mean': mean, 'Pred_lower': lower, 'Pred_upper': upper})
