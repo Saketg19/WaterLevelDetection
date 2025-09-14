@@ -224,9 +224,9 @@ with tab_main:
     model_choice = st.selectbox("Select Model", list(models.keys()))
 
     possible_features = [col for col in df.columns if col not in ['Date', 'Water_Level_m']]
+    # FIX: Removed lag features from the default selection
     default_features = [
-        'Temperature_C', 'Rainfall_mm', 'Year', 'Month', 'DayOfYear', 
-        'Water_Level_lag1', 'Water_Level_lag7', 'Rainfall_lag1'
+        'Temperature_C', 'Rainfall_mm', 'Year', 'Month', 'DayOfYear'
     ]
     selected_features = st.multiselect("Select Features for Training", possible_features, default=[f for f in default_features if f in possible_features])
     
@@ -268,22 +268,19 @@ with tab_main:
         pred_date = st.date_input("Select date for prediction", value=datetime.now())
         
         input_data = {}
-        # FIX: Automatically handle lag features and only ask for current data
         lag_features = ['Water_Level_lag1', 'Water_Level_lag7', 'Rainfall_lag1']
         
         for feature in st.session_state['main_features']:
             if feature in ['Year', 'Month', 'Day', 'DayOfYear'] or feature in lag_features:
-                continue # These are derived automatically
+                continue 
             input_data[feature] = st.number_input(f"Enter value for {feature}", value=df[feature].mean())
 
         if st.button("Predict Groundwater Level"):
-            # Derive date features
             input_data['Year'] = pred_date.year
             input_data['Month'] = pred_date.month
             input_data['Day'] = pred_date.day
             input_data['DayOfYear'] = pred_date.timetuple().tm_yday
             
-            # Automatically get lag features from the end of the dataset
             if 'Water_Level_lag1' in st.session_state['main_features']:
                 input_data['Water_Level_lag1'] = df['Water_Level_m'].iloc[-1]
             if 'Water_Level_lag7' in st.session_state['main_features']:
@@ -291,13 +288,25 @@ with tab_main:
             if 'Rainfall_lag1' in st.session_state['main_features']:
                 input_data['Rainfall_lag1'] = df['Rainfall_mm'].iloc[-1]
 
-            # Create DataFrame in the correct order
             pred_df = pd.DataFrame([input_data])[st.session_state['main_features']]
             
             pred_scaled = st.session_state['main_scaler'].transform(pred_df)
             prediction = st.session_state['main_model'].predict(pred_scaled)
             
-            st.success(f"Predicted Water Level for {pred_date}: **{prediction[0]:.3f} m**")
+            # FIX: Display status along with the prediction
+            prediction_value = prediction[0]
+            if prediction_value > 5:
+                status = "Safe ✅"
+            elif 3 < prediction_value <= 5:
+                status = "Semi-Critical ⚠️"
+            elif 2 < prediction_value <= 3:
+                status = "Critical ❗"
+            else:
+                status = "Over-exploited ❌"
+            
+            st.success(f"Predicted Water Level for {pred_date}: **{prediction_value:.3f} m**")
+            st.metric(label="Predicted Status", value=status)
+            
     else:
         st.info("Train a model first to make predictions.")
 
