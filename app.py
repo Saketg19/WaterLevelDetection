@@ -268,10 +268,12 @@ with tab_main:
         pred_date = st.date_input("Select date for prediction", value=datetime.now())
         
         input_data = {}
-        # Create input fields for each selected feature
+        # FIX: Automatically handle lag features and only ask for current data
+        lag_features = ['Water_Level_lag1', 'Water_Level_lag7', 'Rainfall_lag1']
+        
         for feature in st.session_state['main_features']:
-            if feature in ['Year', 'Month', 'Day', 'DayOfYear']:
-                continue # These are derived from the date
+            if feature in ['Year', 'Month', 'Day', 'DayOfYear'] or feature in lag_features:
+                continue # These are derived automatically
             input_data[feature] = st.number_input(f"Enter value for {feature}", value=df[feature].mean())
 
         if st.button("Predict Groundwater Level"):
@@ -280,6 +282,14 @@ with tab_main:
             input_data['Month'] = pred_date.month
             input_data['Day'] = pred_date.day
             input_data['DayOfYear'] = pred_date.timetuple().tm_yday
+            
+            # Automatically get lag features from the end of the dataset
+            if 'Water_Level_lag1' in st.session_state['main_features']:
+                input_data['Water_Level_lag1'] = df['Water_Level_m'].iloc[-1]
+            if 'Water_Level_lag7' in st.session_state['main_features']:
+                input_data['Water_Level_lag7'] = df['Water_Level_m'].iloc[-7]
+            if 'Rainfall_lag1' in st.session_state['main_features']:
+                input_data['Rainfall_lag1'] = df['Rainfall_mm'].iloc[-1]
 
             # Create DataFrame in the correct order
             pred_df = pd.DataFrame([input_data])[st.session_state['main_features']]
