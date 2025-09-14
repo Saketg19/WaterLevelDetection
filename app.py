@@ -3,8 +3,7 @@ Groundwater ML Dashboard + Location-aware reduced-model (Temp+Rainfall+Time+Lags
 - Map selection (leaflet streamlit_folium)
 - Open-Meteo 7-day forecast (no API key required)
 - NASA POWER monthly historical for multi-year climatology (fallback)
-- Reduced model training (no pH/DO) and 7-day + 5-10y projections
-- Optional bootstrap uncertainty
+- Simplified model training and 7-day projections
 """
 
 import streamlit as st
@@ -19,7 +18,6 @@ from sklearn.model_selection import train_test_split
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
-import xgboost as xgb
 import plotly.express as px
 import plotly.graph_objects as go
 import warnings
@@ -134,26 +132,6 @@ def build_reduced_feature_row(temp, rain, date, last_water_level, last_water_lev
         "Rainfall_lag1": last_rain
     }
 
-def project_future_climate_from_monthly_climatology(base_monthly_dict, start_date, years=5, annual_trend_temp_pct=0.0, annual_trend_rain_pct=0.0):
-    """Create monthly projected climate DataFrame."""
-    months = years * 12
-    rows = []
-    for i in range(1, months + 1):
-        d = start_date + relativedelta(months=i)
-        m = d.month
-        base_temp = base_monthly_dict.get("Temperature_C", {})
-        base_rain = base_monthly_dict.get("Rainfall_mm", {})
-        
-        temp_base = base_temp.get(m, 20.0)
-        rain_base = base_rain.get(m, 50.0)
-        
-        years_ahead = i / 12.0
-        temp_proj = temp_base * (1 + annual_trend_temp_pct / 100.0 * years_ahead)
-        rain_proj = rain_base * (1 + annual_trend_rain_pct / 100.0 * years_ahead)
-        
-        rows.append({"Date": d, "Temperature_C": temp_proj, "Rainfall_mm": rain_proj})
-    return pd.DataFrame(rows)
-
 def autoregressive_predict_daily(future_weather_df, model, scaler, features, initial_lags, history):
     """Generates daily predictions autoregressively, using a proper historical seed."""
     predictions = []
@@ -181,22 +159,6 @@ def autoregressive_predict_daily(future_weather_df, model, scaler, features, ini
         prediction_history.append(prediction)
 
     return pd.DataFrame(predictions)
-
-def bootstrap_predict(model_class, model_params, X_train, y_train, X_pred, n_boot=30, random_state=42):
-    """Train bootstrap models and predict to obtain prediction distribution."""
-    rng = np.random.RandomState(random_state)
-    preds = []
-    n = len(X_train)
-    for _ in range(n_boot):
-        idx = rng.randint(0, n, n)
-        Xb, yb = X_train.iloc[idx], y_train.iloc[idx]
-        m = model_class(**model_params)
-        m.fit(Xb, yb)
-        preds.append(m.predict(X_pred))
-    
-    arr = np.vstack(preds)
-    mean, lower, upper = arr.mean(axis=0), np.percentile(arr, 2.5, axis=0), np.percentile(arr, 97.5, axis=0)
-    return mean, lower, upper
 
 # ----------------------
 # App layout
@@ -297,81 +259,35 @@ with tab_location:
     else:
         st.info("Select a location on the map or enter manual coordinates.")
 
-    st.subheader("Model & Projection Settings")
+    st.subheader("Model Training Settings")
     
-    # RE-INTRODUCED: Model and Feature Selection
-    model_choice = st.selectbox("Select Model", ["Random Forest", "XGBoost"])
-    
-    all_possible_features = [
-        'Temperature_C', 'Rainfall_mm', 'Year', 'Month', 'DayOfYear', 
-        'Water_Level_lag1', 'Water_Level_lag7', 'Rainfall_lag1',
-        'Water_Level_ma7', 'Rainfall_ma7'
-    ]
-    default_features = [
-        'Temperature_C', 'Rainfall_mm', 'Year', 'Month', 'DayOfYear', 
-        'Water_Level_lag1', 'Water_Level_lag7', 'Rainfall_lag1'
-    ]
-    
-    selected_features = st.multiselect(
-        "Select Features for Training", 
-        options=all_possible_features, 
-        default=default_features
-    )
-
     test_size = st.slider("Test set size (%)", 10, 40, 20)
-    bootstrap_enabled = st.checkbox("Enable bootstrap uncertainty (slower)", value=False)
-    if bootstrap_enabled:
-        n_boot = st.slider("Bootstrap iterations", 10, 200, 30)
-
-    current_year = datetime.now().year
-    nasa_hist_start = st.number_input("NASA POWER start year", 1981, current_year - 1, 2000)
-    nasa_hist_end = st.number_input("NASA POWER end year", 1981, current_year, current_year)
     
-    if st.button("1) Fetch Climate & Train Model"):
+    if st.button("1) Train Model"):
         if sel_lat is None:
             st.error("Please select a location first.")
-        elif not selected_features:
-            st.error("Please select at least one feature for training.")
         else:
-            with st.spinner("Fetching historical climate and training model..."):
-                hist_monthly = fetch_nasa_power_monthly(sel_lat, sel_lon, nasa_hist_start, nasa_hist_end)
-                if not hist_monthly.empty:
-                    st.success(f"Loaded {len(hist_monthly)} months of NASA POWER history.")
-                    temp_monthly = hist_monthly.groupby(hist_monthly['Date'].dt.month)['Temperature_C'].mean().to_dict()
-                    rain_monthly = hist_monthly.groupby(hist_monthly['Date'].dt.month)['Rainfall_mm'].mean().to_dict()
-                    base_monthly = {"Temperature_C": temp_monthly, "Rainfall_mm": rain_monthly}
-                else:
-                    st.warning("NASA POWER data not found. Using dataset's monthly averages for projections.")
-                    temp_monthly = df.groupby(df['Date'].dt.month)['Temperature_C'].mean().to_dict()
-                    rain_monthly = df.groupby(df['Date'].dt.month)['Rainfall_mm'].mean().to_dict()
-                    base_monthly = {"Temperature_C": temp_monthly, "Rainfall_mm": rain_monthly}
+            with st.spinner("Training Random Forest model..."):
                 
-                for month in range(1, 13):
-                    if pd.isna(base_monthly["Temperature_C"].setdefault(month, 20.0)):
-                        base_monthly["Temperature_C"][month] = 20.0
-                    if pd.isna(base_monthly["Rainfall_mm"].setdefault(month, 50.0)):
-                        base_monthly["Rainfall_mm"][month] = 50.0
+                reduced_features = [
+                    'Temperature_C', 'Rainfall_mm', 'Year', 'Month', 'DayOfYear', 
+                    'Water_Level_lag1', 'Water_Level_lag7', 'Rainfall_lag1'
+                ]
 
-                st.session_state['base_monthly'] = base_monthly
-                X_all, y_all = df[selected_features], df['Water_Level_m']
+                X_all, y_all = df[reduced_features], df['Water_Level_m']
                 X_train, X_test, y_train, y_test = train_test_split(X_all, y_all, test_size=test_size/100.0, random_state=42)
                 
                 scaler = StandardScaler().fit(X_train)
-                
-                if model_choice == "Random Forest":
-                    model = RandomForestRegressor(n_estimators=200, random_state=42, n_jobs=-1)
-                elif model_choice == "XGBoost":
-                    model = xgb.XGBRegressor(objective='reg:squarederror', n_estimators=200, random_state=42)
+                model = RandomForestRegressor(n_estimators=200, random_state=42, n_jobs=-1)
                 
                 model.fit(scaler.transform(X_train), y_train)
                 st.session_state.update({
-                    'reduced_model': model, 'reduced_scaler': scaler, 'reduced_features': selected_features,
-                    'X_train': X_train, 'y_train': y_train
+                    'reduced_model': model, 'reduced_scaler': scaler, 'reduced_features': reduced_features
                 })
 
                 ypred = model.predict(scaler.transform(X_test))
                 r2, rmse, mae = r2_score(y_test, ypred), np.sqrt(mean_squared_error(y_test, ypred)), mean_absolute_error(y_test, ypred)
-                st.success(f"Model trained ({model_choice}) — Test R2: {r2:.3f}, RMSE: {rmse:.3f}, MAE: {mae:.3f}")
+                st.success(f"Model trained — Test R2: {r2:.3f}, RMSE: {rmse:.3f}, MAE: {mae:.3f}")
                 
                 st.session_state.update({
                     'global_last_water_lag1': df['Water_Level_m'].iloc[-1],
@@ -400,45 +316,4 @@ with tab_location:
                         st.plotly_chart(fig7, use_container_width=True)
             except Exception as e:
                 st.error(f"An error occurred during forecast: {e}")
-
-    st.markdown("---")
-    st.subheader("3) Long-Term Groundwater Projection")
-    proj_years = st.selectbox("Projection horizon (years)", [5, 10], index=0)
-    annual_temp_trend = st.slider("Assumed annual temp change (%)", -1.0, 3.0, 0.2, 0.1)
-    annual_rain_trend = st.slider("Assumed annual rainfall change (%)", -5.0, 10.0, 0.0, 0.5)
-    if st.button("Generate Long-Term Projection"):
-        if 'reduced_model' not in st.session_state:
-            st.error("Train the model first (Button 1).")
-        else:
-            with st.spinner(f"Generating {proj_years}-year projection..."):
-                base_monthly, start_dt = st.session_state.get('base_monthly'), datetime.now()
-                proj_monthly_df = project_future_climate_from_monthly_climatology(base_monthly, start_dt, proj_years, annual_temp_trend, annual_rain_trend)
-                
-                proj_monthly_df.set_index('Date', inplace=True)
-                daily_index = pd.date_range(start=proj_monthly_df.index.min(), end=proj_monthly_df.index.max(), freq='D')
-                proj_daily_df = proj_monthly_df.reindex(daily_index).interpolate(method='linear').reset_index().rename(columns={'index': 'Date'})
-
-                initial_lags = {'w1': st.session_state.get('global_last_water_lag1'), 'r1': st.session_state.get('global_last_rain_lag1')}
-                pred_input = autoregressive_predict_daily(proj_daily_df, st.session_state['reduced_model'], st.session_state['reduced_scaler'], st.session_state['reduced_features'], initial_lags, st.session_state['daily_history'])
-
-                if bootstrap_enabled:
-                    st.info(f"Running {n_boot} bootstrap iterations...")
-                    Xp_s = st.session_state['reduced_scaler'].transform(pred_input[st.session_state['reduced_features']])
-                    X_train, y_train = st.session_state['X_train'], st.session_state['y_train']
-                    mean, lower, upper = bootstrap_predict(RandomForestRegressor, st.session_state['reduced_model'].get_params(), X_train, y_train, Xp_s, n_boot)
-                    pred_input.update({'Pred_mean': mean, 'Pred_lower': lower, 'Pred_upper': upper})
-                    
-                    fig_proj = go.Figure([
-                        go.Scatter(x=pred_input['Date'], y=pred_input['Pred_lower'], fill=None, mode='lines', line_color='lightgrey', name='Lower Bound'),
-                        go.Scatter(x=pred_input['Date'], y=pred_input['Pred_upper'], fill='tonexty', mode='lines', line_color='lightgrey', name='Upper Bound'),
-                        go.Scatter(x=pred_input['Date'], y=pred_input['Pred_mean'], mode='lines', line_color='royalblue', name='Mean Prediction'),
-                    ])
-                    fig_proj.update_layout(title=f"{proj_years}-Year Projected Groundwater with Uncertainty", yaxis_title="Water Level (m)")
-                    st.plotly_chart(fig_proj, use_container_width=True)
-                else:
-                    fig_proj = px.line(pred_input, x='Date', y='Predicted_Water_Level_m', title=f"{proj_years}-Year Projected Groundwater Level")
-                    st.plotly_chart(fig_proj, use_container_width=True)
-                
-                st.success(f"Generated {proj_years}-year projection.")
-                st.dataframe(pred_input.head())
 
