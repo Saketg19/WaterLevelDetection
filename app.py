@@ -166,10 +166,12 @@ def autoregressive_predict_daily(future_weather_df, model, scaler, features, ini
         rain = row['Rainfall_mm']
         last_w7 = prediction_history.pop(0)
         
-        feature_values = build_reduced_feature_row(temp, rain, dt, last_w1, last_w7, last_r1)
-        feature_df = pd.DataFrame([feature_values])
+        feature_dict = build_reduced_feature_row(temp, rain, dt, last_w1, last_w7, last_r1)
         
-        X_pred_s = scaler.transform(feature_df[features])
+        # OPTIMIZATION: Create a NumPy array directly, avoiding slow DataFrame creation in the loop.
+        feature_array = np.array([[feature_dict[f] for f in features]])
+        
+        X_pred_s = scaler.transform(feature_array)
         prediction = model.predict(X_pred_s)[0]
         
         result = {'Date': dt, 'Temperature_C': temp, 'Rainfall_mm': rain, 'Predicted_Water_Level_m': prediction}
@@ -322,7 +324,6 @@ with tab_location:
                     rain_monthly = df.groupby(df['Date'].dt.month)['Rainfall_mm'].mean().to_dict()
                     base_monthly = {"Temperature_C": temp_monthly, "Rainfall_mm": rain_monthly}
                 
-                # FIX: Ensure all 12 months are present in the climatology and have valid, non-null numbers.
                 for month in range(1, 13):
                     if pd.isna(base_monthly["Temperature_C"].setdefault(month, 20.0)):
                         base_monthly["Temperature_C"][month] = 20.0
