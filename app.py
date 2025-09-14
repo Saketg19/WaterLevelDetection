@@ -19,6 +19,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
 import plotly.express as px
+import plotly.graph_objects as go
 
 # Model Imports
 from sklearn.linear_model import LinearRegression, Lasso, Ridge, ElasticNet, BayesianRidge
@@ -192,9 +193,22 @@ with tab_main:
     else: status = "Over-exploited ❌"
     c4.markdown(f"**Status:** {status}")
 
-    st.subheader("📈 Water Level Trend")
-    fig = px.line(filtered_df, x='Date', y='Water_Level_m', markers=True)
+    st.subheader("📈 Groundwater Level Trend (DWLR Data)")
+    # --- Advanced Plot ---
+    fig = go.Figure()
+    # Water Level Line
+    fig.add_trace(go.Scatter(x=filtered_df['Date'], y=filtered_df['Water_Level_m'], mode='lines', name='Water Level (m)', line=dict(color='blue')))
+    # 7-day Rolling Average
+    fig.add_trace(go.Scatter(x=filtered_df['Date'], y=filtered_df['Water_Level_ma7'], mode='lines', name='7-day Rolling Average', line=dict(color='red', dash='dash')))
+    
+    # Threshold Lines
+    fig.add_hline(y=5, line_width=2, line_dash="solid", line_color="green", annotation_text="Safe (>5m)", annotation_position="top right")
+    fig.add_hline(y=3, line_width=2, line_dash="solid", line_color="orange", annotation_text="Semi-Critical (3-5m)", annotation_position="bottom right")
+    fig.add_hline(y=2, line_width=2, line_dash="solid", line_color="red", annotation_text="Critical (2-3m)", annotation_position="bottom right")
+    
+    fig.update_layout(yaxis_title="Water Level (m)", xaxis_title="Date")
     st.plotly_chart(fig, use_container_width=True)
+
 
     st.subheader("🌡️ Environmental Factors")
     env_fig = px.line(filtered_df, x='Date', y=['Temperature_C', 'Rainfall_mm'])
@@ -224,7 +238,6 @@ with tab_main:
     model_choice = st.selectbox("Select Model", list(models.keys()))
 
     possible_features = [col for col in df.columns if col not in ['Date', 'Water_Level_m']]
-    # FIX: Removed lag features from the default selection
     default_features = [
         'Temperature_C', 'Rainfall_mm', 'Year', 'Month', 'DayOfYear'
     ]
@@ -293,7 +306,6 @@ with tab_main:
             pred_scaled = st.session_state['main_scaler'].transform(pred_df)
             prediction = st.session_state['main_model'].predict(pred_scaled)
             
-            # FIX: Display status along with the prediction
             prediction_value = prediction[0]
             if prediction_value > 5:
                 status = "Safe ✅"
