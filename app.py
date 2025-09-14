@@ -153,19 +153,16 @@ def project_future_climate_from_monthly_climatology(base_monthly_dict, start_dat
         rows.append({"Date": d, "Temperature_C": temp_proj, "Rainfall_mm": rain_proj})
     return pd.DataFrame(rows)
 
-# NEW: Autoregressive prediction function to fix repetitive graphs
-def autoregressive_predict(future_weather_df, model, scaler, features, initial_lags):
+# UPDATED: Autoregressive function with proper history initialization
+def autoregressive_predict(future_weather_df, model, scaler, features, initial_lags, history):
     """
-    Generates predictions autoregressively, where each prediction is used
-    as an input for the next time step's lag features.
+    Generates predictions autoregressively, using a proper historical seed.
     """
     predictions = []
-    # Use a list to store the history of water level predictions for lag7
-    prediction_history = [initial_lags['w1']] * 7 
+    # Use a copy of the history to avoid modifying the original list
+    prediction_history = list(history)
 
-    # Get initial lag values
     last_w1 = initial_lags['w1']
-    last_w7 = initial_lags['w7']
     last_r1 = initial_lags['r1']
 
     for _, row in future_weather_df.iterrows():
@@ -173,24 +170,22 @@ def autoregressive_predict(future_weather_df, model, scaler, features, initial_l
         temp = row['Temperature_C']
         rain = row['Rainfall_mm']
 
-        # Get lag7 from the history
+        # Get the 7-period lag from the oldest value in our history
         last_w7 = prediction_history.pop(0)
 
         feature_values = build_reduced_feature_row(temp, rain, dt, last_w1, last_w7, last_r1)
         feature_df = pd.DataFrame([feature_values])
         
-        # Scale and predict
         X_pred_s = scaler.transform(feature_df[features])
         prediction = model.predict(X_pred_s)[0]
         
-        # Append results
         result = {
             'Date': dt, 'Temperature_C': temp, 'Rainfall_mm': rain,
             'Predicted_Water_Level_m': prediction
         }
         predictions.append(result)
         
-        # Update lags for the next iteration
+        # Update lags for the next step
         last_w1 = prediction
         last_r1 = rain
         prediction_history.append(prediction)
@@ -359,10 +354,12 @@ with tab_location:
                 ypred = model.predict(scaler.transform(X_test))
                 r2, rmse, mae = r2_score(y_test, ypred), np.sqrt(mean_squared_error(y_test, ypred)), mean_absolute_error(y_test, ypred)
                 st.success(f"Model trained — Test R2: {r2:.3f}, RMSE: {rmse:.3f}, MAE: {mae:.3f}")
+                
+                # UPDATED: Store the proper history for autoregression
                 st.session_state.update({
                     'global_last_water_lag1': df['Water_Level_m'].iloc[-1],
-                    'global_last_water_lag7': df['Water_Level_m'].iloc[-7] if len(df) >= 7 else df['Water_Level_m'].iloc[-1],
-                    'global_last_rain_lag1': df['Rainfall_mm'].iloc[-1]
+                    'global_last_rain_lag1': df['Rainfall_mm'].iloc[-1],
+                    'water_level_history': df['Water_Level_m'].iloc[-7:].tolist() if len(df) >= 7 else [df['Water_Level_m'].iloc[-1]]*7
                 })
 
     st.markdown("---")
@@ -379,10 +376,8 @@ with tab_location:
                     if forecast_df.empty:
                         st.warning("Open-Meteo returned no forecast data.")
                     else:
-                        # UPDATED: Use the new autoregressive function
                         initial_lags = {
                             'w1': st.session_state.get('global_last_water_lag1'),
-                            'w7': st.session_state.get('global_last_water_lag7'),
                             'r1': st.session_state.get('global_last_rain_lag1')
                         }
                         pred_df = autoregressive_predict(
@@ -390,7 +385,8 @@ with tab_location:
                             st.session_state['reduced_model'],
                             st.session_state['reduced_scaler'],
                             st.session_state['reduced_features'],
-                            initial_lags
+                            initial_lags,
+                            st.session_state['water_level_history'] # Pass the true history
                         )
                         
                         st.success("Generated 7-day groundwater predictions.")
@@ -414,10 +410,8 @@ with tab_location:
                 base_monthly, start_dt = st.session_state.get('base_monthly'), datetime.now()
                 proj_df = project_future_climate_from_monthly_climatology(base_monthly, start_dt, proj_years, annual_temp_trend, annual_rain_trend)
                 
-                # UPDATED: Use the new autoregressive function for projections as well
                 initial_lags = {
                     'w1': st.session_state.get('global_last_water_lag1'),
-                    'w7': st.session_state.get('global_last_water_lag7'),
                     'r1': st.session_state.get('global_last_rain_lag1')
                 }
                 pred_input = autoregressive_predict(
@@ -425,15 +419,13 @@ with tab_location:
                     st.session_state['reduced_model'],
                     st.session_state['reduced_scaler'],
                     st.session_state['reduced_features'],
-                    initial_lags
+                    initial_lags,
+                    st.session_state['water_level_history'] # Pass the true history
                 )
 
-                # Bootstrap logic remains the same but uses the new pred_input
                 if bootstrap_enabled:
                     st.info(f"Running {n_boot} bootstrap iterations...")
-                    # Note: Bootstrapping autoregressive predictions is complex. 
-                    # This is a simplified approach.
-                    Xp_s = st.session_state['reduced_scaler'].transform(pred_input[st.session_state['reduced_features']])
+                    Xp_s = st.session_state['reduced_scaler'].transform(pred_input[st.session_state['reduced_features']].drop(columns=['Date'], errors='ignore'))
                     X_train, y_train = st.session_state['X_train'], st.session_state['y_train']
                     mean, lower, upper = bootstrap_predict(RandomForestRegressor, st.session_state['reduced_model'].get_params(), X_train, y_train, Xp_s, n_boot)
                     pred_input.update({'Pred_mean': mean, 'Pred_lower': lower, 'Pred_upper': upper})
