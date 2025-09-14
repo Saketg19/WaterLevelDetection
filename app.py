@@ -97,6 +97,9 @@ def fetch_nasa_power_monthly(lat, lon, start_year=2000, end_year=None):
         pr = params_dict.get("PRECTOT", {})
         rows = []
         for ym, tmp in t2m.items():
+            # FIX: Skip non-numeric keys like 'ANN' for annual averages
+            if not ym.isdigit():
+                continue
             year = int(ym[:4])
             month = int(ym[4:])
             date = pd.Timestamp(year=year, month=month, day=15)
@@ -459,5 +462,4 @@ with tab_location:
                 
                 st.success(f"Generated {proj_years}-year projection.")
                 st.dataframe(pred_input.head())
-
 
