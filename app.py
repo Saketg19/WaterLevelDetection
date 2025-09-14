@@ -97,11 +97,15 @@ def fetch_nasa_power_monthly(lat, lon, start_year=2000, end_year=None):
         pr = params_dict.get("PRECTOT", {})
         rows = []
         for ym, tmp in t2m.items():
-            # FIX: Skip non-numeric keys like 'ANN' for annual averages
-            if not ym.isdigit():
+            # ROBUST FIX: Ensure the key is a 6-digit string (YYYYMM) before processing.
+            # This will skip non-date keys like 'ANN' (annual summary).
+            if not ym.isdigit() or len(ym) != 6:
                 continue
             year = int(ym[:4])
             month = int(ym[4:])
+            # Final check to prevent invalid month numbers
+            if not 1 <= month <= 12:
+                continue
             date = pd.Timestamp(year=year, month=month, day=15)
             rain = pr.get(ym, np.nan)
             rows.append({"Date": date, "Temperature_C": tmp, "Rainfall_mm": rain})
@@ -344,7 +348,7 @@ with tab_location:
                     st.session_state['y_train'] = y_train
 
                     ypred = model.predict(X_test_s)
-                    # FIX: Calculate RMSE using np.sqrt() for broader scikit-learn version compatibility.
+                    
                     r2 = r2_score(y_test, ypred)
                     rmse = np.sqrt(mean_squared_error(y_test, ypred))
                     mae = mean_absolute_error(y_test, ypred)
