@@ -19,6 +19,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
+import xgboost as xgb
 import plotly.express as px
 import plotly.graph_objects as go
 import warnings
@@ -168,8 +169,7 @@ def autoregressive_predict_daily(future_weather_df, model, scaler, features, ini
         
         feature_dict = build_reduced_feature_row(temp, rain, dt, last_w1, last_w7, last_r1)
         
-        # OPTIMIZATION: Create a NumPy array directly, avoiding slow DataFrame creation in the loop.
-        feature_array = np.array([[feature_dict[f] for f in features]])
+        feature_array = np.array([[feature_dict.get(f, 0) for f in features]])
         
         X_pred_s = scaler.transform(feature_array)
         prediction = model.predict(X_pred_s)[0]
@@ -298,6 +298,26 @@ with tab_location:
         st.info("Select a location on the map or enter manual coordinates.")
 
     st.subheader("Model & Projection Settings")
+    
+    # RE-INTRODUCED: Model and Feature Selection
+    model_choice = st.selectbox("Select Model", ["Random Forest", "XGBoost"])
+    
+    all_possible_features = [
+        'Temperature_C', 'Rainfall_mm', 'Year', 'Month', 'DayOfYear', 
+        'Water_Level_lag1', 'Water_Level_lag7', 'Rainfall_lag1',
+        'Water_Level_ma7', 'Rainfall_ma7'
+    ]
+    default_features = [
+        'Temperature_C', 'Rainfall_mm', 'Year', 'Month', 'DayOfYear', 
+        'Water_Level_lag1', 'Water_Level_lag7', 'Rainfall_lag1'
+    ]
+    
+    selected_features = st.multiselect(
+        "Select Features for Training", 
+        options=all_possible_features, 
+        default=default_features
+    )
+
     test_size = st.slider("Test set size (%)", 10, 40, 20)
     bootstrap_enabled = st.checkbox("Enable bootstrap uncertainty (slower)", value=False)
     if bootstrap_enabled:
@@ -310,6 +330,8 @@ with tab_location:
     if st.button("1) Fetch Climate & Train Model"):
         if sel_lat is None:
             st.error("Please select a location first.")
+        elif not selected_features:
+            st.error("Please select at least one feature for training.")
         else:
             with st.spinner("Fetching historical climate and training model..."):
                 hist_monthly = fetch_nasa_power_monthly(sel_lat, sel_lon, nasa_hist_start, nasa_hist_end)
@@ -331,20 +353,25 @@ with tab_location:
                         base_monthly["Rainfall_mm"][month] = 50.0
 
                 st.session_state['base_monthly'] = base_monthly
-                reduced_features = ['Temperature_C', 'Rainfall_mm', 'Year', 'Month', 'DayOfYear', 'Water_Level_lag1', 'Water_Level_lag7', 'Rainfall_lag1']
-                X_all, y_all = df[reduced_features], df['Water_Level_m']
+                X_all, y_all = df[selected_features], df['Water_Level_m']
                 X_train, X_test, y_train, y_test = train_test_split(X_all, y_all, test_size=test_size/100.0, random_state=42)
                 
                 scaler = StandardScaler().fit(X_train)
-                model = RandomForestRegressor(n_estimators=200, random_state=42, n_jobs=-1).fit(scaler.transform(X_train), y_train)
+                
+                if model_choice == "Random Forest":
+                    model = RandomForestRegressor(n_estimators=200, random_state=42, n_jobs=-1)
+                elif model_choice == "XGBoost":
+                    model = xgb.XGBRegressor(objective='reg:squarederror', n_estimators=200, random_state=42)
+                
+                model.fit(scaler.transform(X_train), y_train)
                 st.session_state.update({
-                    'reduced_model': model, 'reduced_scaler': scaler, 'reduced_features': reduced_features,
+                    'reduced_model': model, 'reduced_scaler': scaler, 'reduced_features': selected_features,
                     'X_train': X_train, 'y_train': y_train
                 })
 
                 ypred = model.predict(scaler.transform(X_test))
                 r2, rmse, mae = r2_score(y_test, ypred), np.sqrt(mean_squared_error(y_test, ypred)), mean_absolute_error(y_test, ypred)
-                st.success(f"Model trained — Test R2: {r2:.3f}, RMSE: {rmse:.3f}, MAE: {mae:.3f}")
+                st.success(f"Model trained ({model_choice}) — Test R2: {r2:.3f}, RMSE: {rmse:.3f}, MAE: {mae:.3f}")
                 
                 st.session_state.update({
                     'global_last_water_lag1': df['Water_Level_m'].iloc[-1],
