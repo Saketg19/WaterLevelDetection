@@ -15,7 +15,7 @@ import folium
 from streamlit_folium import st_folium
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import train_test_split, cross_val_score
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
 import plotly.express as px
@@ -215,40 +215,13 @@ with tab_main:
     # --- Machine Learning Section ---
     st.header("⚙️ Machine Learning Model Training")
 
-    # Categorize models
-    tree_based_models = {
-        "Random Forest": RandomForestRegressor(random_state=42),
-        "Gradient Boosting": GradientBoostingRegressor(random_state=42),
-        "XGBoost": xgb.XGBRegressor(random_state=42),
-        "AdaBoost Regressor": AdaBoostRegressor(random_state=42),
-        "Extra Trees": ExtraTreesRegressor(random_state=42),
-        "Decision Tree": DecisionTreeRegressor(random_state=42),
-    }
-
-    linear_models = {
-        "Linear Regression": LinearRegression(),
-        "Lasso": Lasso(random_state=42),
-        "Ridge": Ridge(random_state=42),
-        "Elastic Net": ElasticNet(random_state=42),
-        "Bayesian Ridge": BayesianRidge(),
-    }
-
-    instance_based_models = {
-        "K-Neighbors Regressor": KNeighborsRegressor(),
-        "SVR": SVR()
-    }
-
-    # Combined dictionary for easy lookup
+    tree_based_models = {"Random Forest": RandomForestRegressor(random_state=42), "Gradient Boosting": GradientBoostingRegressor(random_state=42), "XGBoost": xgb.XGBRegressor(random_state=42), "AdaBoost Regressor": AdaBoostRegressor(random_state=42), "Extra Trees": ExtraTreesRegressor(random_state=42), "Decision Tree": DecisionTreeRegressor(random_state=42)}
+    linear_models = {"Linear Regression": LinearRegression(), "Lasso": Lasso(random_state=42), "Ridge": Ridge(random_state=42), "Elastic Net": ElasticNet(random_state=42), "Bayesian Ridge": BayesianRidge()}
+    instance_based_models = {"K-Neighbors Regressor": KNeighborsRegressor(), "SVR": SVR()}
     all_models = {**tree_based_models, **linear_models, **instance_based_models}
-    
-    model_categories = {
-        "Tree-Based Models": tree_based_models,
-        "Linear Models": linear_models,
-        "Instance-Based & Neural": instance_based_models
-    }
+    model_categories = {"Tree-Based Models": tree_based_models, "Linear Models": linear_models, "Instance-Based & Neural": instance_based_models}
 
     category_choice = st.selectbox("Select Model Category", list(model_categories.keys()))
-    
     models_in_category = model_categories[category_choice]
     model_choice = st.selectbox("Select Model", list(models_in_category.keys()))
 
@@ -262,7 +235,7 @@ with tab_main:
         if not selected_features:
             st.error("Please select at least one feature.")
         else:
-            with st.spinner(f"Training {model_choice}..."):
+            with st.spinner(f"Training {model_choice} and evaluating performance..."):
                 X = filtered_df[selected_features]
                 y = filtered_df['Water_Level_m']
                 X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=test_size_main/100.0, random_state=42)
@@ -273,17 +246,93 @@ with tab_main:
                 model = all_models[model_choice]
                 model.fit(X_train_s, y_train)
                 
+                # --- Performance Evaluation ---
+                y_pred_test = model.predict(X_test_s)
+                y_pred_train = model.predict(X_train_s)
+                
+                # Test Metrics
+                r2_test = r2_score(y_test, y_pred_test)
+                rmse_test = np.sqrt(mean_squared_error(y_test, y_pred_test))
+                mae_test = mean_absolute_error(y_test, y_pred_test)
+                
+                # Train Metrics
+                r2_train = r2_score(y_train, y_pred_train)
+                rmse_train = np.sqrt(mean_squared_error(y_train, y_pred_train))
+                mae_train = mean_absolute_error(y_train, y_pred_train)
+                
+                # Cross-Validation
+                cv_scores = cross_val_score(model, X_train_s, y_train, cv=5, scoring='r2')
+                
+                # Feature Importance
+                if hasattr(model, 'feature_importances_'):
+                    importance = model.feature_importances_
+                elif hasattr(model, 'coef_'):
+                    importance = model.coef_
+                else:
+                    importance = None
+
+                # Store results
+                st.session_state['main_model_results'] = {
+                    "model_name": model_choice,
+                    "r2_test": r2_test, "rmse_test": rmse_test, "mae_test": mae_test,
+                    "r2_train": r2_train, "rmse_train": rmse_train, "mae_train": mae_train,
+                    "cv_scores": cv_scores,
+                    "feature_importance": pd.DataFrame({'Feature': selected_features, 'Importance': importance}) if importance is not None else None,
+                    "y_test": y_test, "y_pred_test": y_pred_test
+                }
+                
                 st.session_state['main_model'] = model
                 st.session_state['main_scaler'] = scaler
                 st.session_state['main_features'] = selected_features
                 
-                ypred = model.predict(X_test_s)
-                r2, rmse, mae = r2_score(y_test, ypred), np.sqrt(mean_squared_error(y_test, ypred)), mean_absolute_error(y_test, ypred)
-                
                 st.success(f"Model '{model_choice}' trained successfully!")
-                st.metric("Test R² Score", f"{r2:.3f}")
-                st.metric("Test RMSE", f"{rmse:.3f}")
-    
+
+    # --- Display Model Performance Section ---
+    if 'main_model_results' in st.session_state:
+        results = st.session_state['main_model_results']
+        st.markdown("---")
+        st.header(f"📊 Model Performance: {results['model_name']}")
+
+        # Metric Cards
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("R² Score (Test)", f"{results['r2_test']:.3f}")
+        m2.metric("RMSE (Test)", f"{results['rmse_test']:.3f}")
+        m3.metric("MAE (Test)", f"{results['mae_test']:.3f}")
+        m4.metric("CV Score (R²)", f"{results['cv_scores'].mean():.3f} ± {results['cv_scores'].std():.3f}")
+
+        st.subheader("🔍 Detailed Performance Analysis")
+        g1, g2 = st.columns(2)
+        
+        with g1:
+            # Training vs Test Performance Bar Chart
+            perf_df = pd.DataFrame({
+                'Metric': ['R²', 'RMSE', 'MAE'],
+                'Training': [results['r2_train'], results['rmse_train'], results['mae_train']],
+                'Test': [results['r2_test'], results['rmse_test'], results['mae_test']]
+            }).melt(id_vars='Metric', var_name='Dataset', value_name='Value')
+            
+            fig_perf = px.bar(perf_df, x='Metric', y='Value', color='Dataset', barmode='group', title=f"{results['model_name']} Performance Comparison")
+            st.plotly_chart(fig_perf, use_container_width=True)
+            
+        with g2:
+            # CV Score Distribution Box Plot
+            fig_cv = px.box(pd.DataFrame({'CV Score': results['cv_scores']}), y='CV Score', title="Cross-Validation Scores Distribution")
+            st.plotly_chart(fig_cv, use_container_width=True)
+
+        if results['feature_importance'] is not None:
+            st.subheader("🎯 Feature Importance")
+            feat_imp_df = results['feature_importance'].sort_values('Importance', ascending=False)
+            fig_imp = px.bar(feat_imp_df, x='Importance', y='Feature', orientation='h', title=f"{results['model_name']} Feature Importance")
+            st.plotly_chart(fig_imp, use_container_width=True)
+
+        st.subheader("📈 Predictions vs Actual Values")
+        fig_pred_actual = go.Figure()
+        fig_pred_actual.add_trace(go.Scatter(x=results['y_test'], y=results['y_pred_test'], mode='markers', name='Predictions', marker=dict(color='blue')))
+        fig_pred_actual.add_trace(go.Scatter(x=[results['y_test'].min(), results['y_test'].max()], y=[results['y_test'].min(), results['y_test'].max()], mode='lines', name='Perfect Prediction', line=dict(color='red', dash='dash')))
+        fig_pred_actual.update_layout(title=f"{results['model_name']} Predictions vs Actual Values", xaxis_title="Actual Water Level (m)", yaxis_title="Predicted Water Level (m)")
+        st.plotly_chart(fig_pred_actual, use_container_width=True)
+
+
     st.markdown("---")
     st.header("🔮 Make a Prediction for a Specific Date")
     
@@ -299,12 +348,7 @@ with tab_main:
             input_data[feature] = st.number_input(f"Enter value for {feature}", value=df[feature].mean())
 
         if st.button("Predict Groundwater Level"):
-            input_data.update({
-                'Year': pred_date.year,
-                'Month': pred_date.month,
-                'Day': pred_date.day,
-                'DayOfYear': pred_date.timetuple().tm_yday
-            })
+            input_data.update({'Year': pred_date.year, 'Month': pred_date.month, 'Day': pred_date.day, 'DayOfYear': pred_date.timetuple().tm_yday})
             
             if 'Water_Level_lag1' in st.session_state['main_features']:
                 input_data['Water_Level_lag1'] = df['Water_Level_m'].iloc[-1]
@@ -361,31 +405,20 @@ with tab_location:
     if st.button("1) Train Forecast Model"):
         with st.spinner("Training Random Forest model for forecasting..."):
             
-            reduced_features = [
-                'Temperature_C', 'Rainfall_mm', 'Year', 'Month', 'DayOfYear', 
-                'Water_Level_lag1', 'Water_Level_lag7', 'Rainfall_lag1'
-            ]
-
+            reduced_features = ['Temperature_C', 'Rainfall_mm', 'Year', 'Month', 'DayOfYear', 'Water_Level_lag1', 'Water_Level_lag7', 'Rainfall_lag1']
             X_all, y_all = df[reduced_features], df['Water_Level_m']
             X_train, X_test, y_train, y_test = train_test_split(X_all, y_all, test_size=0.2, random_state=42)
             
             scaler = StandardScaler().fit(X_train)
             model = RandomForestRegressor(n_estimators=200, random_state=42, n_jobs=-1)
-            
             model.fit(scaler.transform(X_train), y_train)
-            st.session_state.update({
-                'forecast_model': model, 'forecast_scaler': scaler, 'forecast_features': reduced_features
-            })
+            st.session_state.update({'forecast_model': model, 'forecast_scaler': scaler, 'forecast_features': reduced_features})
 
             ypred = model.predict(scaler.transform(X_test))
             r2, rmse, mae = r2_score(y_test, ypred), np.sqrt(mean_squared_error(y_test, ypred)), mean_absolute_error(y_test, ypred)
             st.success(f"Forecast Model trained — Test R2: {r2:.3f}, RMSE: {rmse:.3f}, MAE: {mae:.3f}")
             
-            st.session_state.update({
-                'global_last_water_lag1': df['Water_Level_m'].iloc[-1],
-                'global_last_rain_lag1': df['Rainfall_mm'].iloc[-1],
-                'daily_history': df['Water_Level_m'].iloc[-7:].tolist(),
-            })
+            st.session_state.update({'global_last_water_lag1': df['Water_Level_m'].iloc[-1], 'global_last_rain_lag1': df['Rainfall_mm'].iloc[-1], 'daily_history': df['Water_Level_m'].iloc[-7:].tolist()})
 
     st.markdown("---")
     st.subheader("2) Generate 7-Day Groundwater Forecast")
@@ -400,14 +433,7 @@ with tab_location:
                     forecast_df = fetch_open_meteo_forecast(sel_lat, sel_lon)
                     if not forecast_df.empty:
                         initial_lags = {'w1': st.session_state.get('global_last_water_lag1'), 'r1': st.session_state.get('global_last_rain_lag1')}
-                        pred_df = autoregressive_predict_daily(
-                            forecast_df, 
-                            st.session_state['forecast_model'], 
-                            st.session_state['forecast_scaler'], 
-                            st.session_state['forecast_features'], 
-                            initial_lags, 
-                            st.session_state['daily_history']
-                        )
+                        pred_df = autoregressive_predict_daily(forecast_df, st.session_state['forecast_model'], st.session_state['forecast_scaler'], st.session_state['forecast_features'], initial_lags, st.session_state['daily_history'])
                         
                         st.success("Generated 7-day groundwater predictions.")
                         st.dataframe(pred_df)
