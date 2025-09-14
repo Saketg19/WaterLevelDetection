@@ -4,6 +4,7 @@ Groundwater ML Dashboard + Location-aware reduced-model (Temp+Rainfall+Time+Lags
 - Open-Meteo 7-day forecast (no API key required)
 - NASA POWER monthly historical for multi-year climatology (fallback)
 - Simplified model training and 7-day projections
+- Re-introduced multi-model training and single date prediction
 """
 
 import streamlit as st
@@ -15,11 +16,18 @@ from streamlit_folium import st_folium
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
 from sklearn.model_selection import train_test_split
-from sklearn.ensemble import RandomForestRegressor
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
 import plotly.express as px
-import plotly.graph_objects as go
+
+# Model Imports
+from sklearn.linear_model import LinearRegression, Lasso, Ridge, ElasticNet, BayesianRidge
+from sklearn.svm import SVR
+from sklearn.tree import DecisionTreeRegressor
+from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor, AdaBoostRegressor, ExtraTreesRegressor
+from sklearn.neighbors import KNeighborsRegressor
+import xgboost as xgb
+
 import warnings
 warnings.filterwarnings("ignore")
 
@@ -62,45 +70,6 @@ def process_df(df):
     
     df = df.dropna().reset_index(drop=True)
     return df
-
-@st.cache_data
-def fetch_nasa_power_monthly(lat, lon, start_year=2000, end_year=None):
-    """Fetch NASA POWER monthly T2M and PRECTOT. Returns monthly DF."""
-    if end_year is None:
-        end_year = datetime.now().year
-    
-    url = "https://power.larc.nasa.gov/api/temporal/monthly/point"
-    params = {
-        "start": start_year,
-        "end": end_year,
-        "latitude": lat,
-        "longitude": lon,
-        "community": "RE",
-        "parameters": "T2M,PRECTOT",
-        "format": "JSON"
-    }
-    try:
-        r = requests.get(url, params=params, timeout=30)
-        r.raise_for_status()
-        js = r.json()
-        params_dict = js.get("properties", {}).get("parameter", {})
-        t2m = params_dict.get("T2M", {})
-        pr = params_dict.get("PRECTOT", {})
-        rows = []
-        for ym, tmp in t2m.items():
-            if not ym.isdigit() or len(ym) != 6:
-                continue
-            year, month = int(ym[:4]), int(ym[4:])
-            if not 1 <= month <= 12:
-                continue
-            date = pd.Timestamp(year=year, month=month, day=15)
-            rain = pr.get(ym, np.nan)
-            rows.append({"Date": date, "Temperature_C": tmp, "Rainfall_mm": rain})
-        dfm = pd.DataFrame(rows).sort_values("Date").reset_index(drop=True)
-        return dfm
-    except Exception as e:
-        st.warning(f"NASA POWER fetch error: {e}")
-        return pd.DataFrame(columns=["Date", "Temperature_C", "Rainfall_mm"])
 
 def fetch_open_meteo_forecast(lat, lon):
     """Fetch 7-day forecast from Open-Meteo. Returns a DataFrame."""
@@ -164,7 +133,7 @@ def autoregressive_predict_daily(future_weather_df, model, scaler, features, ini
 # App layout
 # ----------------------
 st.set_page_config(page_title="Groundwater ML Dashboard", layout="wide")
-st.title("💧 Groundwater Level ML Dashboard — Location-aware Reduced Model")
+st.title("💧 Groundwater Level ML Analysis Dashboard")
 
 # ================
 # Sidebar Setup
@@ -172,9 +141,6 @@ st.title("💧 Groundwater Level ML Dashboard — Location-aware Reduced Model")
 st.sidebar.header("1. Data Upload")
 uploaded = st.sidebar.file_uploader("Upload DWLR CSV File", type=["csv"])
 use_repo_file = st.sidebar.checkbox("Use sample DWLR_Dataset_2023.csv", value=True)
-
-st.sidebar.header("2. Forecast Information")
-st.sidebar.info("The 7-Day Forecast feature uses the free Open-Meteo API.")
 
 df_raw = None
 if uploaded:
@@ -199,10 +165,10 @@ st.sidebar.markdown(f"**Dataset loaded:** {len(df)} rows ({df['Date'].min().date
 # ---------------------
 # Main App Tabs
 # ---------------------
-tab_main, tab_location = st.tabs(["📊 Dashboard (Original Data)", "📍 Location-Aware Model"])
+tab_main, tab_location = st.tabs(["📊 Main Dashboard & Predictions", "📍 Location-Aware 7-Day Forecast"])
 
 with tab_main:
-    st.header("📊 Groundwater Analysis (from uploaded dataset)")
+    st.header("📊 Groundwater Analysis Report")
     min_date, max_date = df['Date'].min().date(), df['Date'].max().date()
     
     date_range = st.date_input("Filter date range", value=(min_date, max_date), min_value=min_date, max_value=max_date)
@@ -233,12 +199,105 @@ with tab_main:
     st.subheader("🌡️ Environmental Factors")
     env_fig = px.line(filtered_df, x='Date', y=['Temperature_C', 'Rainfall_mm'])
     st.plotly_chart(env_fig, use_container_width=True)
+    
+    st.markdown("---")
 
+    # --- Machine Learning Section ---
+    st.header("⚙️ Machine Learning Model Training")
+
+    models = {
+        "Random Forest": RandomForestRegressor(random_state=42),
+        "Gradient Boosting": GradientBoostingRegressor(random_state=42),
+        "XGBoost": xgb.XGBRegressor(random_state=42),
+        "AdaBoost Regressor": AdaBoostRegressor(random_state=42),
+        "Extra Trees": ExtraTreesRegressor(random_state=42),
+        "Decision Tree": DecisionTreeRegressor(random_state=42),
+        "Linear Regression": LinearRegression(),
+        "Lasso": Lasso(random_state=42),
+        "Ridge": Ridge(random_state=42),
+        "Elastic Net": ElasticNet(random_state=42),
+        "Bayesian Ridge": BayesianRidge(),
+        "K-Neighbors Regressor": KNeighborsRegressor(),
+        "SVR": SVR()
+    }
+    
+    model_choice = st.selectbox("Select Model", list(models.keys()))
+
+    possible_features = [col for col in df.columns if col not in ['Date', 'Water_Level_m']]
+    default_features = [
+        'Temperature_C', 'Rainfall_mm', 'Year', 'Month', 'DayOfYear', 
+        'Water_Level_lag1', 'Water_Level_lag7', 'Rainfall_lag1'
+    ]
+    selected_features = st.multiselect("Select Features for Training", possible_features, default=[f for f in default_features if f in possible_features])
+    
+    test_size_main = st.slider("Test set size (%) for training", 10, 40, 20, key="main_test_size")
+
+    if st.button("Train Selected Model"):
+        if not selected_features:
+            st.error("Please select at least one feature.")
+        else:
+            with st.spinner(f"Training {model_choice}..."):
+                X = filtered_df[selected_features]
+                y = filtered_df['Water_Level_m']
+                X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=test_size_main/100.0, random_state=42)
+                
+                scaler = StandardScaler().fit(X_train)
+                X_train_s = scaler.transform(X_train)
+                X_test_s = scaler.transform(X_test)
+                
+                model = models[model_choice]
+                model.fit(X_train_s, y_train)
+                
+                st.session_state['main_model'] = model
+                st.session_state['main_scaler'] = scaler
+                st.session_state['main_features'] = selected_features
+                
+                ypred = model.predict(X_test_s)
+                r2 = r2_score(y_test, ypred)
+                rmse = np.sqrt(mean_squared_error(y_test, ypred))
+                mae = mean_absolute_error(y_test, ypred)
+                
+                st.success(f"Model '{model_choice}' trained successfully!")
+                st.metric("Test R² Score", f"{r2:.3f}")
+                st.metric("Test RMSE", f"{rmse:.3f}")
+    
+    st.markdown("---")
+    st.header("🔮 Make a Prediction for a Specific Date")
+    
+    if 'main_model' in st.session_state:
+        pred_date = st.date_input("Select date for prediction", value=datetime.now())
+        
+        input_data = {}
+        # Create input fields for each selected feature
+        for feature in st.session_state['main_features']:
+            if feature in ['Year', 'Month', 'Day', 'DayOfYear']:
+                continue # These are derived from the date
+            input_data[feature] = st.number_input(f"Enter value for {feature}", value=df[feature].mean())
+
+        if st.button("Predict Groundwater Level"):
+            # Derive date features
+            input_data['Year'] = pred_date.year
+            input_data['Month'] = pred_date.month
+            input_data['Day'] = pred_date.day
+            input_data['DayOfYear'] = pred_date.timetuple().tm_yday
+
+            # Create DataFrame in the correct order
+            pred_df = pd.DataFrame([input_data])[st.session_state['main_features']]
+            
+            pred_scaled = st.session_state['main_scaler'].transform(pred_df)
+            prediction = st.session_state['main_model'].predict(pred_scaled)
+            
+            st.success(f"Predicted Water Level for {pred_date}: **{prediction[0]:.3f} m**")
+    else:
+        st.info("Train a model first to make predictions.")
+
+    st.markdown("---")
     st.subheader("📋 Data Table")
     st.dataframe(filtered_df, use_container_width=True)
 
+
 with tab_location:
-    st.header("📍 Location-aware Reduced-Model")
+    st.header("📍 Location-aware 7-Day Forecast Model")
     map_col, control_col = st.columns([2, 1])
     with map_col:
         m = folium.Map(location=[20.5937, 78.9629], zoom_start=5)
@@ -259,56 +318,58 @@ with tab_location:
     else:
         st.info("Select a location on the map or enter manual coordinates.")
 
-    st.subheader("Model Training Settings")
+    st.subheader("Model Training")
     
-    test_size = st.slider("Test set size (%)", 10, 40, 20)
-    
-    if st.button("1) Train Model"):
-        if sel_lat is None:
-            st.error("Please select a location first.")
-        else:
-            with st.spinner("Training Random Forest model..."):
-                
-                reduced_features = [
-                    'Temperature_C', 'Rainfall_mm', 'Year', 'Month', 'DayOfYear', 
-                    'Water_Level_lag1', 'Water_Level_lag7', 'Rainfall_lag1'
-                ]
+    if st.button("1) Train Forecast Model"):
+        with st.spinner("Training Random Forest model for forecasting..."):
+            
+            reduced_features = [
+                'Temperature_C', 'Rainfall_mm', 'Year', 'Month', 'DayOfYear', 
+                'Water_Level_lag1', 'Water_Level_lag7', 'Rainfall_lag1'
+            ]
 
-                X_all, y_all = df[reduced_features], df['Water_Level_m']
-                X_train, X_test, y_train, y_test = train_test_split(X_all, y_all, test_size=test_size/100.0, random_state=42)
-                
-                scaler = StandardScaler().fit(X_train)
-                model = RandomForestRegressor(n_estimators=200, random_state=42, n_jobs=-1)
-                
-                model.fit(scaler.transform(X_train), y_train)
-                st.session_state.update({
-                    'reduced_model': model, 'reduced_scaler': scaler, 'reduced_features': reduced_features
-                })
+            X_all, y_all = df[reduced_features], df['Water_Level_m']
+            X_train, X_test, y_train, y_test = train_test_split(X_all, y_all, test_size=0.2, random_state=42)
+            
+            scaler = StandardScaler().fit(X_train)
+            model = RandomForestRegressor(n_estimators=200, random_state=42, n_jobs=-1)
+            
+            model.fit(scaler.transform(X_train), y_train)
+            st.session_state.update({
+                'forecast_model': model, 'forecast_scaler': scaler, 'forecast_features': reduced_features
+            })
 
-                ypred = model.predict(scaler.transform(X_test))
-                r2, rmse, mae = r2_score(y_test, ypred), np.sqrt(mean_squared_error(y_test, ypred)), mean_absolute_error(y_test, ypred)
-                st.success(f"Model trained — Test R2: {r2:.3f}, RMSE: {rmse:.3f}, MAE: {mae:.3f}")
-                
-                st.session_state.update({
-                    'global_last_water_lag1': df['Water_Level_m'].iloc[-1],
-                    'global_last_rain_lag1': df['Rainfall_mm'].iloc[-1],
-                    'daily_history': df['Water_Level_m'].iloc[-7:].tolist(),
-                })
+            ypred = model.predict(scaler.transform(X_test))
+            r2, rmse, mae = r2_score(y_test, ypred), np.sqrt(mean_squared_error(y_test, ypred)), mean_absolute_error(y_test, ypred)
+            st.success(f"Forecast Model trained — Test R2: {r2:.3f}, RMSE: {rmse:.3f}, MAE: {mae:.3f}")
+            
+            st.session_state.update({
+                'global_last_water_lag1': df['Water_Level_m'].iloc[-1],
+                'global_last_rain_lag1': df['Rainfall_mm'].iloc[-1],
+                'daily_history': df['Water_Level_m'].iloc[-7:].tolist(),
+            })
 
     st.markdown("---")
-    st.subheader("2) 7-Day Groundwater Forecast (via Open-Meteo)")
+    st.subheader("2) Generate 7-Day Groundwater Forecast")
     if st.button("Fetch 7-Day Forecast & Predict"):
         if sel_lat is None: 
             st.error("Select a location first.")
-        elif 'reduced_model' not in st.session_state: 
-            st.error("Train the model first (Button 1).")
+        elif 'forecast_model' not in st.session_state: 
+            st.error("Train the forecast model first (Button 1).")
         else:
             try:
                 with st.spinner("Fetching 7-day forecast..."):
                     forecast_df = fetch_open_meteo_forecast(sel_lat, sel_lon)
                     if not forecast_df.empty:
                         initial_lags = {'w1': st.session_state.get('global_last_water_lag1'), 'r1': st.session_state.get('global_last_rain_lag1')}
-                        pred_df = autoregressive_predict_daily(forecast_df, st.session_state['reduced_model'], st.session_state['reduced_scaler'], st.session_state['reduced_features'], initial_lags, st.session_state['daily_history'])
+                        pred_df = autoregressive_predict_daily(
+                            forecast_df, 
+                            st.session_state['forecast_model'], 
+                            st.session_state['forecast_scaler'], 
+                            st.session_state['forecast_features'], 
+                            initial_lags, 
+                            st.session_state['daily_history']
+                        )
                         
                         st.success("Generated 7-day groundwater predictions.")
                         st.dataframe(pred_df)
