@@ -153,15 +153,11 @@ def project_future_climate_from_monthly_climatology(base_monthly_dict, start_dat
         rows.append({"Date": d, "Temperature_C": temp_proj, "Rainfall_mm": rain_proj})
     return pd.DataFrame(rows)
 
-# UPDATED: Autoregressive function with proper history initialization
-def autoregressive_predict(future_weather_df, model, scaler, features, initial_lags, history):
-    """
-    Generates predictions autoregressively, using a proper historical seed.
-    """
+# NEW: Separate function for daily autoregressive prediction
+def autoregressive_predict_daily(future_weather_df, model, scaler, features, initial_lags, history):
+    """Generates daily predictions autoregressively for the 7-day forecast."""
     predictions = []
-    # Use a copy of the history to avoid modifying the original list
     prediction_history = list(history)
-
     last_w1 = initial_lags['w1']
     last_r1 = initial_lags['r1']
 
@@ -169,8 +165,36 @@ def autoregressive_predict(future_weather_df, model, scaler, features, initial_l
         dt = row['Date']
         temp = row['Temperature_C']
         rain = row['Rainfall_mm']
+        last_w7 = prediction_history.pop(0)
+        
+        feature_values = build_reduced_feature_row(temp, rain, dt, last_w1, last_w7, last_r1)
+        feature_df = pd.DataFrame([feature_values])
+        
+        X_pred_s = scaler.transform(feature_df[features])
+        prediction = model.predict(X_pred_s)[0]
+        
+        result = {'Date': dt, 'Temperature_C': temp, 'Rainfall_mm': rain, 'Predicted_Water_Level_m': prediction}
+        predictions.append(result)
+        
+        last_w1, last_r1 = prediction, rain
+        prediction_history.append(prediction)
 
-        # Get the 7-period lag from the oldest value in our history
+    return pd.DataFrame(predictions)
+
+# NEW: Separate function for monthly autoregressive prediction
+def autoregressive_predict_monthly(future_weather_df, model, scaler, features, initial_lags, monthly_history):
+    """Generates monthly predictions autoregressively for the long-term projection."""
+    predictions = []
+    # For monthly, we assume lag7 is roughly two months ago, simplifying the logic.
+    # A more complex model might use a 7-month lag.
+    prediction_history = list(monthly_history) 
+    last_w1 = initial_lags['w1']
+    last_r1 = initial_lags['r1']
+
+    for _, row in future_weather_df.iterrows():
+        dt = row['Date']
+        temp = row['Temperature_C']
+        rain = row['Rainfall_mm']
         last_w7 = prediction_history.pop(0)
 
         feature_values = build_reduced_feature_row(temp, rain, dt, last_w1, last_w7, last_r1)
@@ -179,19 +203,13 @@ def autoregressive_predict(future_weather_df, model, scaler, features, initial_l
         X_pred_s = scaler.transform(feature_df[features])
         prediction = model.predict(X_pred_s)[0]
         
-        result = {
-            'Date': dt, 'Temperature_C': temp, 'Rainfall_mm': rain,
-            'Predicted_Water_Level_m': prediction
-        }
+        result = {'Date': dt, 'Temperature_C': temp, 'Rainfall_mm': rain, 'Predicted_Water_Level_m': prediction}
         predictions.append(result)
         
-        # Update lags for the next step
-        last_w1 = prediction
-        last_r1 = rain
+        last_w1, last_r1 = prediction, rain
         prediction_history.append(prediction)
 
     return pd.DataFrame(predictions)
-
 
 def bootstrap_predict(model_class, model_params, X_train, y_train, X_pred, n_boot=30, random_state=42):
     """Train bootstrap models and predict to obtain prediction distribution."""
@@ -223,9 +241,7 @@ uploaded = st.sidebar.file_uploader("Upload DWLR CSV File", type=["csv"])
 use_repo_file = st.sidebar.checkbox("Use sample DWLR_Dataset_2023.csv", value=True)
 
 st.sidebar.header("2. Forecast Information")
-st.sidebar.info(
-    "The 7-Day Forecast feature uses the free Open-Meteo API, which does not require an API key."
-)
+st.sidebar.info("The 7-Day Forecast feature uses the free Open-Meteo API.")
 
 df_raw = None
 if uploaded:
@@ -343,9 +359,7 @@ with tab_location:
                 X_train, X_test, y_train, y_test = train_test_split(X_all, y_all, test_size=test_size/100.0, random_state=42)
                 
                 scaler = StandardScaler().fit(X_train)
-                X_train_s = scaler.transform(X_train)
-                
-                model = RandomForestRegressor(n_estimators=200, random_state=42, n_jobs=-1).fit(X_train_s, y_train)
+                model = RandomForestRegressor(n_estimators=200, random_state=42, n_jobs=-1).fit(scaler.transform(X_train), y_train)
                 st.session_state.update({
                     'reduced_model': model, 'reduced_scaler': scaler, 'reduced_features': reduced_features,
                     'X_train': X_train, 'y_train': y_train
@@ -355,11 +369,12 @@ with tab_location:
                 r2, rmse, mae = r2_score(y_test, ypred), np.sqrt(mean_squared_error(y_test, ypred)), mean_absolute_error(y_test, ypred)
                 st.success(f"Model trained — Test R2: {r2:.3f}, RMSE: {rmse:.3f}, MAE: {mae:.3f}")
                 
-                # UPDATED: Store the proper history for autoregression
+                df_monthly = df.set_index('Date').resample('M').mean().reset_index()
                 st.session_state.update({
                     'global_last_water_lag1': df['Water_Level_m'].iloc[-1],
                     'global_last_rain_lag1': df['Rainfall_mm'].iloc[-1],
-                    'water_level_history': df['Water_Level_m'].iloc[-7:].tolist() if len(df) >= 7 else [df['Water_Level_m'].iloc[-1]]*7
+                    'daily_history': df['Water_Level_m'].iloc[-7:].tolist(),
+                    'monthly_history': df_monthly['Water_Level_m'].iloc[-7:].tolist()
                 })
 
     st.markdown("---")
@@ -371,29 +386,16 @@ with tab_location:
             st.error("Train the model first (Button 1).")
         else:
             try:
-                with st.spinner("Fetching 7-day forecast from Open-Meteo..."):
+                with st.spinner("Fetching 7-day forecast..."):
                     forecast_df = fetch_open_meteo_forecast(sel_lat, sel_lon)
-                    if forecast_df.empty:
-                        st.warning("Open-Meteo returned no forecast data.")
-                    else:
-                        initial_lags = {
-                            'w1': st.session_state.get('global_last_water_lag1'),
-                            'r1': st.session_state.get('global_last_rain_lag1')
-                        }
-                        pred_df = autoregressive_predict(
-                            forecast_df,
-                            st.session_state['reduced_model'],
-                            st.session_state['reduced_scaler'],
-                            st.session_state['reduced_features'],
-                            initial_lags,
-                            st.session_state['water_level_history'] # Pass the true history
-                        )
+                    if not forecast_df.empty:
+                        initial_lags = {'w1': st.session_state.get('global_last_water_lag1'), 'r1': st.session_state.get('global_last_rain_lag1')}
+                        pred_df = autoregressive_predict_daily(forecast_df, st.session_state['reduced_model'], st.session_state['reduced_scaler'], st.session_state['reduced_features'], initial_lags, st.session_state['daily_history'])
                         
                         st.success("Generated 7-day groundwater predictions.")
                         st.dataframe(pred_df)
                         fig7 = px.line(pred_df, x='Date', y='Predicted_Water_Level_m', title="7-Day Predicted Groundwater Level", markers=True)
                         st.plotly_chart(fig7, use_container_width=True)
-
             except Exception as e:
                 st.error(f"An error occurred during forecast: {e}")
 
@@ -410,22 +412,12 @@ with tab_location:
                 base_monthly, start_dt = st.session_state.get('base_monthly'), datetime.now()
                 proj_df = project_future_climate_from_monthly_climatology(base_monthly, start_dt, proj_years, annual_temp_trend, annual_rain_trend)
                 
-                initial_lags = {
-                    'w1': st.session_state.get('global_last_water_lag1'),
-                    'r1': st.session_state.get('global_last_rain_lag1')
-                }
-                pred_input = autoregressive_predict(
-                    proj_df,
-                    st.session_state['reduced_model'],
-                    st.session_state['reduced_scaler'],
-                    st.session_state['reduced_features'],
-                    initial_lags,
-                    st.session_state['water_level_history'] # Pass the true history
-                )
+                initial_lags = {'w1': st.session_state.get('global_last_water_lag1'), 'r1': st.session_state.get('global_last_rain_lag1')}
+                pred_input = autoregressive_predict_monthly(proj_df, st.session_state['reduced_model'], st.session_state['reduced_scaler'], st.session_state['reduced_features'], initial_lags, st.session_state['monthly_history'])
 
                 if bootstrap_enabled:
                     st.info(f"Running {n_boot} bootstrap iterations...")
-                    Xp_s = st.session_state['reduced_scaler'].transform(pred_input[st.session_state['reduced_features']].drop(columns=['Date'], errors='ignore'))
+                    Xp_s = st.session_state['reduced_scaler'].transform(pred_input.drop(columns=['Date']))
                     X_train, y_train = st.session_state['X_train'], st.session_state['y_train']
                     mean, lower, upper = bootstrap_predict(RandomForestRegressor, st.session_state['reduced_model'].get_params(), X_train, y_train, Xp_s, n_boot)
                     pred_input.update({'Pred_mean': mean, 'Pred_lower': lower, 'Pred_upper': upper})
