@@ -116,7 +116,6 @@ def fetch_open_meteo_forecast(lat, lon):
     r.raise_for_status()
     data = r.json()
     
-    # Parse the response into a clean DataFrame
     daily_data = data['daily']
     forecast_df = pd.DataFrame({
         'Date': pd.to_datetime(daily_data['time']),
@@ -154,6 +153,51 @@ def project_future_climate_from_monthly_climatology(base_monthly_dict, start_dat
         rows.append({"Date": d, "Temperature_C": temp_proj, "Rainfall_mm": rain_proj})
     return pd.DataFrame(rows)
 
+# NEW: Autoregressive prediction function to fix repetitive graphs
+def autoregressive_predict(future_weather_df, model, scaler, features, initial_lags):
+    """
+    Generates predictions autoregressively, where each prediction is used
+    as an input for the next time step's lag features.
+    """
+    predictions = []
+    # Use a list to store the history of water level predictions for lag7
+    prediction_history = [initial_lags['w1']] * 7 
+
+    # Get initial lag values
+    last_w1 = initial_lags['w1']
+    last_w7 = initial_lags['w7']
+    last_r1 = initial_lags['r1']
+
+    for _, row in future_weather_df.iterrows():
+        dt = row['Date']
+        temp = row['Temperature_C']
+        rain = row['Rainfall_mm']
+
+        # Get lag7 from the history
+        last_w7 = prediction_history.pop(0)
+
+        feature_values = build_reduced_feature_row(temp, rain, dt, last_w1, last_w7, last_r1)
+        feature_df = pd.DataFrame([feature_values])
+        
+        # Scale and predict
+        X_pred_s = scaler.transform(feature_df[features])
+        prediction = model.predict(X_pred_s)[0]
+        
+        # Append results
+        result = {
+            'Date': dt, 'Temperature_C': temp, 'Rainfall_mm': rain,
+            'Predicted_Water_Level_m': prediction
+        }
+        predictions.append(result)
+        
+        # Update lags for the next iteration
+        last_w1 = prediction
+        last_r1 = rain
+        prediction_history.append(prediction)
+
+    return pd.DataFrame(predictions)
+
+
 def bootstrap_predict(model_class, model_params, X_train, y_train, X_pred, n_boot=30, random_state=42):
     """Train bootstrap models and predict to obtain prediction distribution."""
     rng = np.random.RandomState(random_state)
@@ -184,7 +228,6 @@ uploaded = st.sidebar.file_uploader("Upload DWLR CSV File", type=["csv"])
 use_repo_file = st.sidebar.checkbox("Use sample DWLR_Dataset_2023.csv", value=True)
 
 st.sidebar.header("2. Forecast Information")
-# NEW: Simplified info for Open-Meteo
 st.sidebar.info(
     "The 7-Day Forecast feature uses the free Open-Meteo API, which does not require an API key."
 )
@@ -336,25 +379,20 @@ with tab_location:
                     if forecast_df.empty:
                         st.warning("Open-Meteo returned no forecast data.")
                     else:
-                        last_w1 = st.session_state.get('global_last_water_lag1')
-                        last_w7 = st.session_state.get('global_last_water_lag7')
-                        last_rain = st.session_state.get('global_last_rain_lag1')
-                        forecast_predictions = []
-                        current_lags = {'w1': last_w1, 'w7': last_w7, 'r1': last_rain}
+                        # UPDATED: Use the new autoregressive function
+                        initial_lags = {
+                            'w1': st.session_state.get('global_last_water_lag1'),
+                            'w7': st.session_state.get('global_last_water_lag7'),
+                            'r1': st.session_state.get('global_last_rain_lag1')
+                        }
+                        pred_df = autoregressive_predict(
+                            forecast_df,
+                            st.session_state['reduced_model'],
+                            st.session_state['reduced_scaler'],
+                            st.session_state['reduced_features'],
+                            initial_lags
+                        )
                         
-                        for _, day_forecast in forecast_df.iterrows():
-                            dt = day_forecast['Date']
-                            temp = day_forecast['Temperature_C']
-                            rain = day_forecast['Rainfall_mm']
-                            
-                            feature_df = pd.DataFrame([build_reduced_feature_row(temp, rain, dt, current_lags['w1'], current_lags['w7'], current_lags['r1'])])
-                            X_pred_s = st.session_state['reduced_scaler'].transform(feature_df[st.session_state['reduced_features']])
-                            prediction = st.session_state['reduced_model'].predict(X_pred_s)[0]
-                            
-                            forecast_predictions.append({'Date': dt, 'Temperature_C': temp, 'Rainfall_mm': rain, 'Predicted_Water_Level_m': prediction})
-                            current_lags['w7'], current_lags['w1'], current_lags['r1'] = current_lags['w1'], prediction, rain
-                        
-                        pred_df = pd.DataFrame(forecast_predictions)
                         st.success("Generated 7-day groundwater predictions.")
                         st.dataframe(pred_df)
                         fig7 = px.line(pred_df, x='Date', y='Predicted_Water_Level_m', title="7-Day Predicted Groundwater Level", markers=True)
@@ -376,13 +414,26 @@ with tab_location:
                 base_monthly, start_dt = st.session_state.get('base_monthly'), datetime.now()
                 proj_df = project_future_climate_from_monthly_climatology(base_monthly, start_dt, proj_years, annual_temp_trend, annual_rain_trend)
                 
-                last_w1, last_w7, last_rain = st.session_state.get('global_last_water_lag1'), st.session_state.get('global_last_water_lag7'), st.session_state.get('global_last_rain_lag1')
-                rows = [ {**build_reduced_feature_row(r['Temperature_C'], r['Rainfall_mm'], r['Date'], last_w1, last_w7, last_rain), "Date": r['Date']} for _, r in proj_df.iterrows() ]
-                pred_input = pd.DataFrame(rows)
-                Xp_s = st.session_state['reduced_scaler'].transform(pred_input[st.session_state['reduced_features']])
+                # UPDATED: Use the new autoregressive function for projections as well
+                initial_lags = {
+                    'w1': st.session_state.get('global_last_water_lag1'),
+                    'w7': st.session_state.get('global_last_water_lag7'),
+                    'r1': st.session_state.get('global_last_rain_lag1')
+                }
+                pred_input = autoregressive_predict(
+                    proj_df,
+                    st.session_state['reduced_model'],
+                    st.session_state['reduced_scaler'],
+                    st.session_state['reduced_features'],
+                    initial_lags
+                )
 
+                # Bootstrap logic remains the same but uses the new pred_input
                 if bootstrap_enabled:
                     st.info(f"Running {n_boot} bootstrap iterations...")
+                    # Note: Bootstrapping autoregressive predictions is complex. 
+                    # This is a simplified approach.
+                    Xp_s = st.session_state['reduced_scaler'].transform(pred_input[st.session_state['reduced_features']])
                     X_train, y_train = st.session_state['X_train'], st.session_state['y_train']
                     mean, lower, upper = bootstrap_predict(RandomForestRegressor, st.session_state['reduced_model'].get_params(), X_train, y_train, Xp_s, n_boot)
                     pred_input.update({'Pred_mean': mean, 'Pred_lower': lower, 'Pred_upper': upper})
@@ -395,8 +446,6 @@ with tab_location:
                     fig_proj.update_layout(title=f"{proj_years}-Year Projected Groundwater with Uncertainty", yaxis_title="Water Level (m)")
                     st.plotly_chart(fig_proj, use_container_width=True)
                 else:
-                    preds = st.session_state['reduced_model'].predict(Xp_s)
-                    pred_input['Predicted_Water_Level_m'] = preds
                     fig_proj = px.line(pred_input, x='Date', y='Predicted_Water_Level_m', title=f"{proj_years}-Year Projected Groundwater Level")
                     st.plotly_chart(fig_proj, use_container_width=True)
                 
