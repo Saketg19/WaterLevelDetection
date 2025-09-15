@@ -224,7 +224,12 @@ with tab_main:
         m2.metric("RMSE (Test)", f"{res['rmse_test']:.3f}")
         m3.metric("MAE (Test)", f"{res['mae_test']:.3f}")
         m4.metric("CV R²", f"{res['cv_scores'].mean():.3f} ± {res['cv_scores'].std():.3f}")
-        st.metric("Naive Lag-1 R²", f"{res['baseline_r2']:.3f}")
+
+        # Safe baseline display
+        if 'baseline_r2' in res and not np.isnan(res['baseline_r2']):
+            st.metric("Naive Lag-1 R²", f"{res['baseline_r2']:.3f}")
+        else:
+            st.metric("Naive Lag-1 R²", "N/A")
 
         fig_pred_actual = go.Figure([
             go.Scatter(x=res['y_test'], y=res['y_pred_test'], mode='markers', name='Predictions'),
