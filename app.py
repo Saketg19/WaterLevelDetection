@@ -189,7 +189,8 @@ with tab_main:
     model_choice = st.selectbox("Select Model", list(models_in_category.keys()))
 
     possible_features = [col for col in df.columns if col not in ['Date', 'Water_Level_m']]
-    default_features = ['Temperature_C', 'Rainfall_mm', 'Year', 'Month', 'DayOfYear', 'Water_Level_lag1', 'Water_Level_lag7', 'Rainfall_lag1']
+    # UPDATED: Default features now exclude "leaky" lag/rolling features for a more realistic model evaluation.
+    default_features = ['Temperature_C', 'Rainfall_mm', 'Year', 'Month', 'DayOfYear']
     selected_features = st.multiselect("Select Features for Training", possible_features, default=[f for f in default_features if f in possible_features])
     
     test_size_main = st.slider("Test set size (%) for training", 10, 40, 20, key="main_test_size")
