@@ -11,3 +11,4 @@ plotly
 python-dateutil
 matplotlib
 lightgbm
+catboost
