@@ -9,3 +9,5 @@ xgboost
 joblib
 plotly
 python-dateutil
+matplotlib
+
