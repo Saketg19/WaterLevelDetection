@@ -153,4 +153,4 @@ if st.button("Train Selected Model"):
             cv_scores = cross_val_score(model, X_train_s, y_train, cv=5, scoring='r2')
             
             if hasattr(model, 'feature_importances_'): importance = model.feature_importances_
-            elif hasattr
+            elif hasattr:
