@@ -10,4 +10,4 @@ joblib
 plotly
 python-dateutil
 matplotlib
-
+lightgbm
