@@ -4,7 +4,7 @@ CORRECTED VERSION - Fixed data leakage and overfitting issues for realistic perf
 - Map selection (leaflet streamlit_folium)
 - Open-Meteo 7-day forecast (no API key required)
 - Simplified model training and 7-day projections
-- Re-introduced multi-model training and single date prediction
+- Re-introduced multi-model training and single date predictionn
 """
 
 import streamlit as st
