@@ -190,7 +190,8 @@ with tab_main:
     model_choice = st.selectbox("Select Model", list(models_in_category.keys()))
 
     possible_features = [col for col in df.columns if col not in ['Date', 'Water_Level_m']]
-    default_features = ['Temperature_C', 'Rainfall_mm', 'Year', 'Month', 'DayOfYear']
+    # RE-INTRODUCED LAG FEATURES TO THE DEFAULT SELECTION AS REQUESTED
+    default_features = ['Temperature_C', 'Rainfall_mm', 'Year', 'Month', 'DayOfYear', 'Water_Level_lag1', 'Water_Level_lag7', 'Rainfall_lag1']
     selected_features = st.multiselect("Select Features for Training", possible_features, default=[f for f in default_features if f in possible_features])
     
     test_size_main = st.slider("Test set size (%) for training", 10, 40, 20, key="main_test_size")
@@ -325,7 +326,6 @@ with tab_location:
             df['Latitude'] = 20.5937
             df['Longitude'] = 78.9629
 
-            # Define feature groups
             loc_features = ['Latitude', 'Longitude']
             time_weather_features = ['Temperature_C', 'Rainfall_mm', 'Year', 'Month', 'DayOfYear']
             forecast_features = time_weather_features + loc_features
@@ -333,7 +333,6 @@ with tab_location:
             X_all, y_all = df[forecast_features], df['Water_Level_m']
             X_train, X_test, y_train, y_test = train_test_split(X_all, y_all, test_size=0.2, random_state=42)
             
-            # FIX: Scale only weather/time features, not location features
             scaler = StandardScaler().fit(X_train[time_weather_features])
             
             X_train_scaled_weather = scaler.transform(X_train[time_weather_features])
@@ -342,9 +341,8 @@ with tab_location:
             model = RandomForestRegressor(n_estimators=100, random_state=42, n_jobs=-1)
             model.fit(X_train_final, y_train)
             
-            st.session_state.update({'forecast_model': model, 'forecast_scaler': scaler, 'forecast_features': forecast_features, 'time_weather_features': time_weather_features, 'loc_features': loc_features})
+            st.session_state.update({'forecast_model': model, 'forecast_scaler': scaler, 'time_weather_features': time_weather_features, 'loc_features': loc_features})
 
-            # For evaluation, scale test data similarly
             X_test_scaled_weather = scaler.transform(X_test[time_weather_features])
             X_test_final = np.hstack([X_test_scaled_weather, X_test[loc_features].values])
             ypred = model.predict(X_test_final)
@@ -368,7 +366,6 @@ with tab_location:
                         forecast_df['Latitude'] = sel_lat
                         forecast_df['Longitude'] = sel_lon
                         
-                        # FIX: Apply the same scaling transformation as in training
                         time_weather_features = st.session_state['time_weather_features']
                         loc_features = st.session_state['loc_features']
                         
