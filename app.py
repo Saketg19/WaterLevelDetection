@@ -322,23 +322,33 @@ with tab_location:
     if st.button("1) Train Forecast Model"):
         with st.spinner("Training location-aware Random Forest model for forecasting..."):
             
-            # Add Latitude and Longitude to the original dataframe for training
-            # Use a default location as the "source" of the training data
-            df['Latitude'] = 20.5937  # Default central India lat
-            df['Longitude'] = 78.9629 # Default central India lon
+            df['Latitude'] = 20.5937
+            df['Longitude'] = 78.9629
 
-            # Add Latitude and Longitude to the feature set
-            forecast_features = ['Temperature_C', 'Rainfall_mm', 'Year', 'Month', 'DayOfYear', 'Latitude', 'Longitude']
+            # Define feature groups
+            loc_features = ['Latitude', 'Longitude']
+            time_weather_features = ['Temperature_C', 'Rainfall_mm', 'Year', 'Month', 'DayOfYear']
+            forecast_features = time_weather_features + loc_features
             
             X_all, y_all = df[forecast_features], df['Water_Level_m']
             X_train, X_test, y_train, y_test = train_test_split(X_all, y_all, test_size=0.2, random_state=42)
             
-            scaler = StandardScaler().fit(X_train)
+            # FIX: Scale only weather/time features, not location features
+            scaler = StandardScaler().fit(X_train[time_weather_features])
+            
+            X_train_scaled_weather = scaler.transform(X_train[time_weather_features])
+            X_train_final = np.hstack([X_train_scaled_weather, X_train[loc_features].values])
+            
             model = RandomForestRegressor(n_estimators=100, random_state=42, n_jobs=-1)
-            model.fit(scaler.transform(X_train), y_train)
-            st.session_state.update({'forecast_model': model, 'forecast_scaler': scaler, 'forecast_features': forecast_features})
+            model.fit(X_train_final, y_train)
+            
+            st.session_state.update({'forecast_model': model, 'forecast_scaler': scaler, 'forecast_features': forecast_features, 'time_weather_features': time_weather_features, 'loc_features': loc_features})
 
-            ypred = model.predict(scaler.transform(X_test))
+            # For evaluation, scale test data similarly
+            X_test_scaled_weather = scaler.transform(X_test[time_weather_features])
+            X_test_final = np.hstack([X_test_scaled_weather, X_test[loc_features].values])
+            ypred = model.predict(X_test_final)
+
             r2, rmse = r2_score(y_test, ypred), np.sqrt(mean_squared_error(y_test, ypred))
             st.success(f"Location-Aware Forecast Model trained — Test R2: {r2:.3f}, RMSE: {rmse:.3f}")
 
@@ -352,18 +362,20 @@ with tab_location:
                 with st.spinner("Fetching 7-day forecast..."):
                     forecast_df = fetch_open_meteo_forecast(sel_lat, sel_lon)
                     if not forecast_df.empty:
-                        # Prepare features for the forecast data
                         forecast_df['Year'] = forecast_df['Date'].dt.year
                         forecast_df['Month'] = forecast_df['Date'].dt.month
                         forecast_df['DayOfYear'] = forecast_df['Date'].dt.dayofyear
-                        # Add the selected Latitude and Longitude to the forecast data
                         forecast_df['Latitude'] = sel_lat
                         forecast_df['Longitude'] = sel_lon
                         
-                        X_pred = forecast_df[st.session_state['forecast_features']]
-                        X_pred_s = st.session_state['forecast_scaler'].transform(X_pred)
+                        # FIX: Apply the same scaling transformation as in training
+                        time_weather_features = st.session_state['time_weather_features']
+                        loc_features = st.session_state['loc_features']
                         
-                        predictions = st.session_state['forecast_model'].predict(X_pred_s)
+                        X_pred_scaled_weather = st.session_state['forecast_scaler'].transform(forecast_df[time_weather_features])
+                        X_pred_final = np.hstack([X_pred_scaled_weather, forecast_df[loc_features].values])
+                        
+                        predictions = st.session_state['forecast_model'].predict(X_pred_final)
                         
                         pred_df = forecast_df.copy()
                         pred_df['Predicted_Water_Level_m'] = predictions
