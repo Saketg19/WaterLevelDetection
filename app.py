@@ -1,15 +1,22 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.model_selection import TimeSeriesSplit, cross_val_score
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 from sklearn.preprocessing import StandardScaler
 import xgboost as xgb
 
-# Load data
-df = pd.read_csv("groundwater_data.csv")
+# Upload CSV
+st.title("🌊 Groundwater Level Prediction Dashboard")
+
+uploaded_file = st.file_uploader("Upload your groundwater_data.csv", type=["csv"])
+
+if uploaded_file is not None:
+    df = pd.read_csv(uploaded_file)
+else:
+    st.warning("Please upload a CSV file to continue.")
+    st.stop()
 
 # Ensure datetime
 if 'Date' in df.columns:
@@ -29,16 +36,12 @@ df['Water_Level_lag1'] = df['Water_Level_m'].shift(1)
 df['Water_Level_lag7'] = df['Water_Level_m'].shift(7)
 df = df.dropna()
 
-# Streamlit UI
-st.title("🌊 Groundwater Level Prediction Dashboard")
-
 # Sidebar
 st.sidebar.header("Model Settings")
 
 model_choice = st.sidebar.selectbox("Select Model", ["Random Forest", "XGBoost"])
 
 # --- Force lag features ---
-all_features = ["Temperature_C", "Rainfall_mm", "sin_doy", "cos_doy", "Water_Level_lag1", "Water_Level_lag7"]
 user_features = st.sidebar.multiselect(
     "Select Additional Features",
     ["Temperature_C", "Rainfall_mm", "sin_doy", "cos_doy"],
@@ -104,8 +107,9 @@ else:
 
 # Plot results
 st.subheader("📈 Predictions vs Actuals")
-fig, ax = plt.subplots(figsize=(12, 5))
-ax.plot(y_test.index, y_test, label="Actual", color="blue")
-ax.plot(y_test.index, y_pred, label="Predicted", color="red")
-ax.legend()
-st.pyplot(fig)
+results_df = pd.DataFrame({
+    "Actual": y_test.values,
+    "Predicted": y_pred
+}, index=y_test.index)
+
+st.line_chart(results_df)
