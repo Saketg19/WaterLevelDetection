@@ -320,9 +320,16 @@ with tab_location:
     st.subheader("Model Training for Forecasting")
     
     if st.button("1) Train Forecast Model"):
-        with st.spinner("Training simplified Random Forest model for forecasting..."):
-            # FIX: Use a simplified feature set that does not depend on historical water levels
-            forecast_features = ['Temperature_C', 'Rainfall_mm', 'Year', 'Month', 'DayOfYear']
+        with st.spinner("Training location-aware Random Forest model for forecasting..."):
+            
+            # Add Latitude and Longitude to the original dataframe for training
+            # Use a default location as the "source" of the training data
+            df['Latitude'] = 20.5937  # Default central India lat
+            df['Longitude'] = 78.9629 # Default central India lon
+
+            # Add Latitude and Longitude to the feature set
+            forecast_features = ['Temperature_C', 'Rainfall_mm', 'Year', 'Month', 'DayOfYear', 'Latitude', 'Longitude']
+            
             X_all, y_all = df[forecast_features], df['Water_Level_m']
             X_train, X_test, y_train, y_test = train_test_split(X_all, y_all, test_size=0.2, random_state=42)
             
@@ -333,7 +340,7 @@ with tab_location:
 
             ypred = model.predict(scaler.transform(X_test))
             r2, rmse = r2_score(y_test, ypred), np.sqrt(mean_squared_error(y_test, ypred))
-            st.success(f"Simplified Forecast Model trained — Test R2: {r2:.3f}, RMSE: {rmse:.3f}")
+            st.success(f"Location-Aware Forecast Model trained — Test R2: {r2:.3f}, RMSE: {rmse:.3f}")
 
     st.markdown("---")
     st.subheader("2) Generate 7-Day Groundwater Forecast")
@@ -349,6 +356,9 @@ with tab_location:
                         forecast_df['Year'] = forecast_df['Date'].dt.year
                         forecast_df['Month'] = forecast_df['Date'].dt.month
                         forecast_df['DayOfYear'] = forecast_df['Date'].dt.dayofyear
+                        # Add the selected Latitude and Longitude to the forecast data
+                        forecast_df['Latitude'] = sel_lat
+                        forecast_df['Longitude'] = sel_lon
                         
                         X_pred = forecast_df[st.session_state['forecast_features']]
                         X_pred_s = st.session_state['forecast_scaler'].transform(X_pred)
