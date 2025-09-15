@@ -93,42 +93,6 @@ def fetch_open_meteo_forecast(lat, lon):
     })
     return forecast_df
 
-def build_reduced_feature_row(temp, rain, date, last_water_level, last_water_level7, last_rain):
-    """Create a single-row dict of reduced features used by model."""
-    return {
-        "Temperature_C": temp, "Rainfall_mm": rain,
-        "Year": date.year, "Month": date.month, "DayOfYear": date.timetuple().tm_yday,
-        "Water_Level_lag1": last_water_level, "Water_Level_lag7": last_water_level7,
-        "Rainfall_lag1": last_rain
-    }
-
-def autoregressive_predict_daily(future_weather_df, model, scaler, features, initial_lags, history):
-    """Generates daily predictions autoregressively, using a proper historical seed."""
-    predictions = []
-    prediction_history = list(history)
-    last_w1 = initial_lags['w1']
-    last_r1 = initial_lags['r1']
-
-    for _, row in future_weather_df.iterrows():
-        dt = row['Date']
-        temp = row['Temperature_C']
-        rain = row['Rainfall_mm']
-        last_w7 = prediction_history.pop(0)
-        
-        feature_dict = build_reduced_feature_row(temp, rain, dt, last_w1, last_w7, last_r1)
-        
-        feature_array = np.array([[feature_dict.get(f, 0) for f in features]])
-        
-        X_pred_s = scaler.transform(feature_array)
-        prediction = model.predict(X_pred_s)[0]
-        
-        result = {'Date': dt, 'Temperature_C': temp, 'Rainfall_mm': rain, 'Predicted_Water_Level_m': prediction}
-        predictions.append(result)
-        
-        last_w1, last_r1 = prediction, rain
-        prediction_history.append(prediction)
-
-    return pd.DataFrame(predictions)
 
 # ----------------------
 # App layout
@@ -246,54 +210,29 @@ with tab_main:
                 model = all_models[model_choice]
                 model.fit(X_train_s, y_train)
                 
-                # --- Performance Evaluation ---
-                y_pred_test = model.predict(X_test_s)
-                y_pred_train = model.predict(X_train_s)
-                
-                # Test Metrics
-                r2_test = r2_score(y_test, y_pred_test)
-                rmse_test = np.sqrt(mean_squared_error(y_test, y_pred_test))
-                mae_test = mean_absolute_error(y_test, y_pred_test)
-                
-                # Train Metrics
-                r2_train = r2_score(y_train, y_pred_train)
-                rmse_train = np.sqrt(mean_squared_error(y_train, y_pred_train))
-                mae_train = mean_absolute_error(y_train, y_pred_train)
-                
-                # Cross-Validation
+                y_pred_test, y_pred_train = model.predict(X_test_s), model.predict(X_train_s)
+                r2_test, rmse_test, mae_test = r2_score(y_test, y_pred_test), np.sqrt(mean_squared_error(y_test, y_pred_test)), mean_absolute_error(y_test, y_pred_test)
+                r2_train, rmse_train, mae_train = r2_score(y_train, y_pred_train), np.sqrt(mean_squared_error(y_train, y_pred_train)), mean_absolute_error(y_train, y_pred_train)
                 cv_scores = cross_val_score(model, X_train_s, y_train, cv=5, scoring='r2')
                 
-                # Feature Importance
-                if hasattr(model, 'feature_importances_'):
-                    importance = model.feature_importances_
-                elif hasattr(model, 'coef_'):
-                    importance = model.coef_
-                else:
-                    importance = None
+                if hasattr(model, 'feature_importances_'): importance = model.feature_importances_
+                elif hasattr(model, 'coef_'): importance = model.coef_
+                else: importance = None
 
-                # Store results
                 st.session_state['main_model_results'] = {
-                    "model_name": model_choice,
-                    "r2_test": r2_test, "rmse_test": rmse_test, "mae_test": mae_test,
-                    "r2_train": r2_train, "rmse_train": rmse_train, "mae_train": mae_train,
-                    "cv_scores": cv_scores,
+                    "model_name": model_choice, "r2_test": r2_test, "rmse_test": rmse_test, "mae_test": mae_test,
+                    "r2_train": r2_train, "rmse_train": rmse_train, "mae_train": mae_train, "cv_scores": cv_scores,
                     "feature_importance": pd.DataFrame({'Feature': selected_features, 'Importance': importance}) if importance is not None else None,
                     "y_test": y_test, "y_pred_test": y_pred_test
                 }
-                
-                st.session_state['main_model'] = model
-                st.session_state['main_scaler'] = scaler
-                st.session_state['main_features'] = selected_features
-                
+                st.session_state.update({'main_model': model, 'main_scaler': scaler, 'main_features': selected_features})
                 st.success(f"Model '{model_choice}' trained successfully!")
 
-    # --- Display Model Performance Section ---
     if 'main_model_results' in st.session_state:
         results = st.session_state['main_model_results']
         st.markdown("---")
         st.header(f"📊 Model Performance: {results['model_name']}")
 
-        # Metric Cards
         m1, m2, m3, m4 = st.columns(4)
         m1.metric("R² Score (Test)", f"{results['r2_test']:.3f}")
         m2.metric("RMSE (Test)", f"{results['rmse_test']:.3f}")
@@ -304,18 +243,11 @@ with tab_main:
         g1, g2 = st.columns(2)
         
         with g1:
-            # Training vs Test Performance Bar Chart
-            perf_df = pd.DataFrame({
-                'Metric': ['R²', 'RMSE', 'MAE'],
-                'Training': [results['r2_train'], results['rmse_train'], results['mae_train']],
-                'Test': [results['r2_test'], results['rmse_test'], results['mae_test']]
-            }).melt(id_vars='Metric', var_name='Dataset', value_name='Value')
-            
+            perf_df = pd.DataFrame({'Metric': ['R²', 'RMSE', 'MAE'], 'Training': [results['r2_train'], results['rmse_train'], results['mae_train']], 'Test': [results['r2_test'], results['rmse_test'], results['mae_test']]}).melt(id_vars='Metric', var_name='Dataset', value_name='Value')
             fig_perf = px.bar(perf_df, x='Metric', y='Value', color='Dataset', barmode='group', title=f"{results['model_name']} Performance Comparison")
             st.plotly_chart(fig_perf, use_container_width=True)
             
         with g2:
-            # CV Score Distribution Box Plot
             fig_cv = px.box(pd.DataFrame({'CV Score': results['cv_scores']}), y='CV Score', title="Cross-Validation Scores Distribution")
             st.plotly_chart(fig_cv, use_container_width=True)
 
@@ -326,41 +258,29 @@ with tab_main:
             st.plotly_chart(fig_imp, use_container_width=True)
 
         st.subheader("📈 Predictions vs Actual Values")
-        fig_pred_actual = go.Figure()
-        fig_pred_actual.add_trace(go.Scatter(x=results['y_test'], y=results['y_pred_test'], mode='markers', name='Predictions', marker=dict(color='blue')))
-        fig_pred_actual.add_trace(go.Scatter(x=[results['y_test'].min(), results['y_test'].max()], y=[results['y_test'].min(), results['y_test'].max()], mode='lines', name='Perfect Prediction', line=dict(color='red', dash='dash')))
+        fig_pred_actual = go.Figure([go.Scatter(x=results['y_test'], y=results['y_pred_test'], mode='markers', name='Predictions', marker=dict(color='blue')), go.Scatter(x=[results['y_test'].min(), results['y_test'].max()], y=[results['y_test'].min(), results['y_test'].max()], mode='lines', name='Perfect Prediction', line=dict(color='red', dash='dash'))])
         fig_pred_actual.update_layout(title=f"{results['model_name']} Predictions vs Actual Values", xaxis_title="Actual Water Level (m)", yaxis_title="Predicted Water Level (m)")
         st.plotly_chart(fig_pred_actual, use_container_width=True)
-
 
     st.markdown("---")
     st.header("🔮 Make a Prediction for a Specific Date")
     
     if 'main_model' in st.session_state:
         pred_date = st.date_input("Select date for prediction", value=datetime.now())
-        
-        input_data = {}
-        lag_features = ['Water_Level_lag1', 'Water_Level_lag7', 'Rainfall_lag1']
+        input_data, lag_features = {}, ['Water_Level_lag1', 'Water_Level_lag7', 'Rainfall_lag1']
         
         for feature in st.session_state['main_features']:
-            if feature in ['Year', 'Month', 'Day', 'DayOfYear'] or feature in lag_features:
-                continue 
+            if feature in ['Year', 'Month', 'Day', 'DayOfYear'] or feature in lag_features: continue 
             input_data[feature] = st.number_input(f"Enter value for {feature}", value=df[feature].mean())
 
         if st.button("Predict Groundwater Level"):
             input_data.update({'Year': pred_date.year, 'Month': pred_date.month, 'Day': pred_date.day, 'DayOfYear': pred_date.timetuple().tm_yday})
-            
-            if 'Water_Level_lag1' in st.session_state['main_features']:
-                input_data['Water_Level_lag1'] = df['Water_Level_m'].iloc[-1]
-            if 'Water_Level_lag7' in st.session_state['main_features']:
-                input_data['Water_Level_lag7'] = df['Water_Level_m'].iloc[-7]
-            if 'Rainfall_lag1' in st.session_state['main_features']:
-                input_data['Rainfall_lag1'] = df['Rainfall_mm'].iloc[-1]
+            if 'Water_Level_lag1' in st.session_state['main_features']: input_data['Water_Level_lag1'] = df['Water_Level_m'].iloc[-1]
+            if 'Water_Level_lag7' in st.session_state['main_features']: input_data['Water_Level_lag7'] = df['Water_Level_m'].iloc[-7]
+            if 'Rainfall_lag1' in st.session_state['main_features']: input_data['Rainfall_lag1'] = df['Rainfall_mm'].iloc[-1]
 
             pred_df = pd.DataFrame([input_data])[st.session_state['main_features']]
-            
-            pred_scaled = st.session_state['main_scaler'].transform(pred_df)
-            prediction_value = st.session_state['main_model'].predict(pred_scaled)[0]
+            prediction_value = st.session_state['main_model'].predict(st.session_state['main_scaler'].transform(pred_df))[0]
             
             if prediction_value > 5: status = "Safe ✅"
             elif 3 < prediction_value <= 5: status = "Semi-Critical ⚠️"
@@ -369,7 +289,6 @@ with tab_main:
             
             st.success(f"Predicted Water Level for {pred_date}: **{prediction_value:.3f} m**")
             st.metric(label="Predicted Status", value=status)
-            
     else:
         st.info("Train a model first to make predictions.")
 
@@ -395,48 +314,52 @@ with tab_location:
     elif map_out and map_out.get("last_clicked"):
         sel_lat, sel_lon = map_out["last_clicked"]["lat"], map_out["last_clicked"]["lng"]
     
-    if sel_lat is not None:
-        st.success(f"Selected coords: {sel_lat:.6f}, {sel_lon:.6f}")
-    else:
-        st.info("Select a location on the map or enter manual coordinates.")
+    if sel_lat is not None: st.success(f"Selected coords: {sel_lat:.6f}, {sel_lon:.6f}")
+    else: st.info("Select a location on the map or enter manual coordinates.")
 
-    st.subheader("Model Training")
+    st.subheader("Model Training for Forecasting")
     
     if st.button("1) Train Forecast Model"):
-        with st.spinner("Training Random Forest model for forecasting..."):
-            
-            reduced_features = ['Temperature_C', 'Rainfall_mm', 'Year', 'Month', 'DayOfYear', 'Water_Level_lag1', 'Water_Level_lag7', 'Rainfall_lag1']
-            X_all, y_all = df[reduced_features], df['Water_Level_m']
+        with st.spinner("Training simplified Random Forest model for forecasting..."):
+            # FIX: Use a simplified feature set that does not depend on historical water levels
+            forecast_features = ['Temperature_C', 'Rainfall_mm', 'Year', 'Month', 'DayOfYear']
+            X_all, y_all = df[forecast_features], df['Water_Level_m']
             X_train, X_test, y_train, y_test = train_test_split(X_all, y_all, test_size=0.2, random_state=42)
             
             scaler = StandardScaler().fit(X_train)
-            model = RandomForestRegressor(n_estimators=200, random_state=42, n_jobs=-1)
+            model = RandomForestRegressor(n_estimators=100, random_state=42, n_jobs=-1)
             model.fit(scaler.transform(X_train), y_train)
-            st.session_state.update({'forecast_model': model, 'forecast_scaler': scaler, 'forecast_features': reduced_features})
+            st.session_state.update({'forecast_model': model, 'forecast_scaler': scaler, 'forecast_features': forecast_features})
 
             ypred = model.predict(scaler.transform(X_test))
-            r2, rmse, mae = r2_score(y_test, ypred), np.sqrt(mean_squared_error(y_test, ypred)), mean_absolute_error(y_test, ypred)
-            st.success(f"Forecast Model trained — Test R2: {r2:.3f}, RMSE: {rmse:.3f}, MAE: {mae:.3f}")
-            
-            st.session_state.update({'global_last_water_lag1': df['Water_Level_m'].iloc[-1], 'global_last_rain_lag1': df['Rainfall_mm'].iloc[-1], 'daily_history': df['Water_Level_m'].iloc[-7:].tolist()})
+            r2, rmse = r2_score(y_test, ypred), np.sqrt(mean_squared_error(y_test, ypred))
+            st.success(f"Simplified Forecast Model trained — Test R2: {r2:.3f}, RMSE: {rmse:.3f}")
 
     st.markdown("---")
     st.subheader("2) Generate 7-Day Groundwater Forecast")
     if st.button("Fetch 7-Day Forecast & Predict"):
-        if sel_lat is None: 
-            st.error("Select a location first.")
-        elif 'forecast_model' not in st.session_state: 
-            st.error("Train the forecast model first (Button 1).")
+        if sel_lat is None: st.error("Select a location first.")
+        elif 'forecast_model' not in st.session_state: st.error("Train the forecast model first (Button 1).")
         else:
             try:
                 with st.spinner("Fetching 7-day forecast..."):
                     forecast_df = fetch_open_meteo_forecast(sel_lat, sel_lon)
                     if not forecast_df.empty:
-                        initial_lags = {'w1': st.session_state.get('global_last_water_lag1'), 'r1': st.session_state.get('global_last_rain_lag1')}
-                        pred_df = autoregressive_predict_daily(forecast_df, st.session_state['forecast_model'], st.session_state['forecast_scaler'], st.session_state['forecast_features'], initial_lags, st.session_state['daily_history'])
+                        # Prepare features for the forecast data
+                        forecast_df['Year'] = forecast_df['Date'].dt.year
+                        forecast_df['Month'] = forecast_df['Date'].dt.month
+                        forecast_df['DayOfYear'] = forecast_df['Date'].dt.dayofyear
+                        
+                        X_pred = forecast_df[st.session_state['forecast_features']]
+                        X_pred_s = st.session_state['forecast_scaler'].transform(X_pred)
+                        
+                        predictions = st.session_state['forecast_model'].predict(X_pred_s)
+                        
+                        pred_df = forecast_df.copy()
+                        pred_df['Predicted_Water_Level_m'] = predictions
                         
                         st.success("Generated 7-day groundwater predictions.")
-                        st.dataframe(pred_df)
+                        st.dataframe(pred_df[['Date', 'Temperature_C', 'Rainfall_mm', 'Predicted_Water_Level_m']])
                         fig7 = px.line(pred_df, x='Date', y='Predicted_Water_Level_m', title="7-Day Predicted Groundwater Level", markers=True)
                         st.plotly_chart(fig7, use_container_width=True)
             except Exception as e:
