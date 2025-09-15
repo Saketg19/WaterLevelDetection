@@ -1,9 +1,8 @@
 """
-Backup
 Groundwater ML Dashboard + Location-aware reduced-model (Temp+Rainfall+Time+Lags)
+CORRECTED VERSION - Fixed data leakage and overfitting issues for realistic performance
 - Map selection (leaflet streamlit_folium)
 - Open-Meteo 7-day forecast (no API key required)
-- NASA POWER monthly historical for multi-year climatology (fallback)
 - Simplified model training and 7-day projections
 - Re-introduced multi-model training and single date prediction
 """
@@ -16,7 +15,7 @@ import folium
 from streamlit_folium import st_folium
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
-from sklearn.model_selection import train_test_split, cross_val_score
+from sklearn.model_selection import train_test_split, cross_val_score, TimeSeriesSplit
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
 import plotly.express as px
@@ -61,14 +60,22 @@ def process_df(df):
     df['Day'] = df['Date'].dt.day
     df['DayOfYear'] = df['Date'].dt.dayofyear
     
-    # Lag features
-    df['Water_Level_lag1'] = df['Water_Level_m'].shift(1)
-    df['Water_Level_lag7'] = df['Water_Level_m'].shift(7)
+    # Create proper lag features without data leakage
+    # Only use lags of predictive features, not the target variable itself
     df['Rainfall_lag1'] = df['Rainfall_mm'].shift(1)
+    df['Rainfall_lag3'] = df['Rainfall_mm'].shift(3)
+    df['Temperature_lag1'] = df['Temperature_C'].shift(1)
     
-    # Rolling features
-    df['Water_Level_ma7'] = df['Water_Level_m'].rolling(window=7).mean()
+    # Rolling features of predictive variables only
+    df['Rainfall_ma3'] = df['Rainfall_mm'].rolling(window=3).mean()
     df['Rainfall_ma7'] = df['Rainfall_mm'].rolling(window=7).mean()
+    df['Temperature_ma3'] = df['Temperature_C'].rolling(window=3).mean()
+    
+    # Add seasonal features
+    df['sin_month'] = np.sin(2 * np.pi * df['Month'] / 12)
+    df['cos_month'] = np.cos(2 * np.pi * df['Month'] / 12)
+    df['sin_day'] = np.sin(2 * np.pi * df['DayOfYear'] / 365)
+    df['cos_day'] = np.cos(2 * np.pi * df['DayOfYear'] / 365)
     
     df = df.dropna().reset_index(drop=True)
     return df
@@ -99,7 +106,7 @@ def fetch_open_meteo_forecast(lat, lon):
 # App layout
 # ----------------------
 st.set_page_config(page_title="Groundwater ML Dashboard", layout="wide")
-st.title("💧 Groundwater Level ML Analysis Dashboard")
+st.title("💧 Groundwater Level ML Analysis Dashboard - Corrected Version")
 
 # ================
 # Sidebar Setup
@@ -161,7 +168,6 @@ with tab_main:
     st.subheader("📈 Groundwater Level Trend (DWLR Data)")
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=filtered_df['Date'], y=filtered_df['Water_Level_m'], mode='lines', name='Water Level (m)', line=dict(color='blue')))
-    fig.add_trace(go.Scatter(x=filtered_df['Date'], y=filtered_df['Water_Level_ma7'], mode='lines', name='7-day Rolling Average', line=dict(color='red', dash='dash')))
     
     fig.add_hline(y=5, line_width=2, line_dash="solid", line_color="green", annotation_text="Safe (>5m)", annotation_position="top right")
     fig.add_hline(y=3, line_width=2, line_dash="solid", line_color="orange", annotation_text="Semi-Critical (3-5m)", annotation_position="bottom right")
@@ -180,9 +186,25 @@ with tab_main:
     # --- Machine Learning Section ---
     st.header("⚙️ Machine Learning Model Training")
 
-    tree_based_models = {"Random Forest": RandomForestRegressor(random_state=42), "Gradient Boosting": GradientBoostingRegressor(random_state=42), "XGBoost": xgb.XGBRegressor(random_state=42), "AdaBoost Regressor": AdaBoostRegressor(random_state=42), "Extra Trees": ExtraTreesRegressor(random_state=42), "Decision Tree": DecisionTreeRegressor(random_state=42)}
-    linear_models = {"Linear Regression": LinearRegression(), "Lasso": Lasso(random_state=42), "Ridge": Ridge(random_state=42), "Elastic Net": ElasticNet(random_state=42), "Bayesian Ridge": BayesianRidge()}
-    instance_based_models = {"K-Neighbors Regressor": KNeighborsRegressor(), "SVR": SVR()}
+    # Reduced model complexity to prevent overfitting
+    tree_based_models = {
+        "Random Forest": RandomForestRegressor(n_estimators=50, max_depth=10, min_samples_split=5, min_samples_leaf=2, random_state=42),
+        "Gradient Boosting": GradientBoostingRegressor(n_estimators=50, max_depth=6, learning_rate=0.1, random_state=42),
+        "XGBoost": xgb.XGBRegressor(n_estimators=50, max_depth=6, learning_rate=0.1, random_state=42),
+        "Decision Tree": DecisionTreeRegressor(max_depth=8, min_samples_split=5, min_samples_leaf=2, random_state=42)
+    }
+    linear_models = {
+        "Linear Regression": LinearRegression(),
+        "Lasso": Lasso(alpha=1.0, random_state=42),
+        "Ridge": Ridge(alpha=1.0, random_state=42),
+        "Elastic Net": ElasticNet(alpha=1.0, l1_ratio=0.5, random_state=42),
+        "Bayesian Ridge": BayesianRidge()
+    }
+    instance_based_models = {
+        "K-Neighbors Regressor": KNeighborsRegressor(n_neighbors=10),
+        "SVR": SVR(C=1.0, gamma='scale')
+    }
+    
     all_models = {**tree_based_models, **linear_models, **instance_based_models}
     model_categories = {"Tree-Based Models": tree_based_models, "Linear Models": linear_models, "Instance-Based & Neural": instance_based_models}
 
@@ -191,9 +213,19 @@ with tab_main:
     model_choice = st.selectbox("Select Model", list(models_in_category.keys()))
 
     possible_features = [col for col in df.columns if col not in ['Date', 'Water_Level_m']]
-    default_features = ['Temperature_C', 'Rainfall_mm', 'Year', 'Month', 'DayOfYear']
-    selected_features = st.multiselect("Select Features for Training", possible_features, default=[f for f in default_features if f in possible_features])
     
+    # Safer default features without data leakage
+    safe_features = [
+        'Temperature_C', 'Rainfall_mm', 'Year', 'Month', 'DayOfYear',
+        'Rainfall_lag1', 'Temperature_lag1', 'Rainfall_ma3', 'Temperature_ma3',
+        'sin_month', 'cos_month', 'sin_day', 'cos_day'
+    ]
+    default_features = [f for f in safe_features if f in possible_features]
+    
+    selected_features = st.multiselect("Select Features for Training", possible_features, default=default_features)
+    
+    # Use time series split for temporal data
+    use_time_split = st.checkbox("Use Time Series Split (Recommended for temporal data)", value=True)
     test_size_main = st.slider("Test set size (%) for training", 10, 40, 20, key="main_test_size")
 
     if st.button("Train Selected Model"):
@@ -203,10 +235,20 @@ with tab_main:
             with st.spinner(f"Training {model_choice} and evaluating performance..."):
                 X = filtered_df[selected_features]
                 y = filtered_df['Water_Level_m']
-                X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=test_size_main/100.0, random_state=42)
                 
-                scaler = StandardScaler().fit(X_train)
-                X_train_s, X_test_s = scaler.transform(X_train), scaler.transform(X_test)
+                # Use proper time series split to avoid look-ahead bias
+                if use_time_split:
+                    split_idx = int(len(X) * (1 - test_size_main/100.0))
+                    X_train, X_test = X.iloc[:split_idx], X.iloc[split_idx:]
+                    y_train, y_test = y.iloc[:split_idx], y.iloc[split_idx:]
+                    st.info("Using chronological train/test split to prevent look-ahead bias")
+                else:
+                    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=test_size_main/100.0, random_state=42)
+                
+                # Fit scaler only on training data
+                scaler = StandardScaler()
+                X_train_s = scaler.fit_transform(X_train)
+                X_test_s = scaler.transform(X_test)  # Transform, don't fit
                 
                 model = all_models[model_choice]
                 model.fit(X_train_s, y_train)
@@ -214,19 +256,40 @@ with tab_main:
                 y_pred_test, y_pred_train = model.predict(X_test_s), model.predict(X_train_s)
                 r2_test, rmse_test, mae_test = r2_score(y_test, y_pred_test), np.sqrt(mean_squared_error(y_test, y_pred_test)), mean_absolute_error(y_test, y_pred_test)
                 r2_train, rmse_train, mae_train = r2_score(y_train, y_pred_train), np.sqrt(mean_squared_error(y_train, y_pred_train)), mean_absolute_error(y_train, y_pred_train)
-                cv_scores = cross_val_score(model, X_train_s, y_train, cv=5, scoring='r2')
                 
-                if hasattr(model, 'feature_importances_'): importance = model.feature_importances_
-                elif hasattr(model, 'coef_'): importance = model.coef_
-                else: importance = None
+                # Use TimeSeriesSplit for cross-validation on temporal data
+                if use_time_split:
+                    tscv = TimeSeriesSplit(n_splits=5)
+                    cv_scores = cross_val_score(model, X_train_s, y_train, cv=tscv, scoring='r2')
+                else:
+                    cv_scores = cross_val_score(model, X_train_s, y_train, cv=5, scoring='r2')
+                
+                if hasattr(model, 'feature_importances_'): 
+                    importance = model.feature_importances_
+                elif hasattr(model, 'coef_'): 
+                    importance = np.abs(model.coef_) if hasattr(model.coef_, '__len__') else [abs(model.coef_)]
+                else: 
+                    importance = None
+
+                # Add overfitting detection
+                train_test_gap = r2_train - r2_test
+                overfitting_warning = ""
+                if train_test_gap > 0.2:
+                    overfitting_warning = f"⚠️ Potential overfitting detected! Training R² ({r2_train:.3f}) significantly higher than test R² ({r2_test:.3f})"
+                elif train_test_gap > 0.1:
+                    overfitting_warning = f"⚡ Mild overfitting detected. Consider simpler model or more regularization."
 
                 st.session_state['main_model_results'] = {
                     "model_name": model_choice, "r2_test": r2_test, "rmse_test": rmse_test, "mae_test": mae_test,
                     "r2_train": r2_train, "rmse_train": rmse_train, "mae_train": mae_train, "cv_scores": cv_scores,
                     "feature_importance": pd.DataFrame({'Feature': selected_features, 'Importance': importance}) if importance is not None else None,
-                    "y_test": y_test, "y_pred_test": y_pred_test
+                    "y_test": y_test, "y_pred_test": y_pred_test, "overfitting_warning": overfitting_warning,
+                    "train_test_gap": train_test_gap
                 }
                 st.session_state.update({'main_model': model, 'main_scaler': scaler, 'main_features': selected_features})
+                
+                if overfitting_warning:
+                    st.warning(overfitting_warning)
                 st.success(f"Model '{model_choice}' trained successfully!")
 
     if 'main_model_results' in st.session_state:
@@ -239,6 +302,11 @@ with tab_main:
         m2.metric("RMSE (Test)", f"{results['rmse_test']:.3f}")
         m3.metric("MAE (Test)", f"{results['mae_test']:.3f}")
         m4.metric("CV Score (R²)", f"{results['cv_scores'].mean():.3f} ± {results['cv_scores'].std():.3f}")
+        
+        # Show overfitting metrics
+        if results['overfitting_warning']:
+            st.warning(results['overfitting_warning'])
+            st.metric("Train-Test R² Gap", f"{results['train_test_gap']:.3f}", delta="Lower is better")
 
         st.subheader("🔍 Detailed Performance Analysis")
         g1, g2 = st.columns(2)
@@ -268,17 +336,34 @@ with tab_main:
     
     if 'main_model' in st.session_state:
         pred_date = st.date_input("Select date for prediction", value=datetime.now())
-        input_data, lag_features = {}, ['Water_Level_lag1', 'Water_Level_lag7', 'Rainfall_lag1']
+        input_data = {}
         
-        for feature in st.session_state['main_features']:
-            if feature in ['Year', 'Month', 'Day', 'DayOfYear'] or feature in lag_features: continue 
-            input_data[feature] = st.number_input(f"Enter value for {feature}", value=df[feature].mean())
+        # Only ask for actual predictive features
+        predictive_features = [f for f in st.session_state['main_features'] 
+                               if f not in ['Year', 'Month', 'Day', 'DayOfYear', 'sin_month', 'cos_month', 'sin_day', 'cos_day']]
+        
+        for feature in predictive_features:
+            default_val = df[feature].median() if feature in df.columns else 0.0
+            input_data[feature] = st.number_input(f"Enter value for {feature}", value=float(default_val))
 
         if st.button("Predict Groundwater Level"):
-            input_data.update({'Year': pred_date.year, 'Month': pred_date.month, 'Day': pred_date.day, 'DayOfYear': pred_date.timetuple().tm_yday})
-            if 'Water_Level_lag1' in st.session_state['main_features']: input_data['Water_Level_lag1'] = df['Water_Level_m'].iloc[-1]
-            if 'Water_Level_lag7' in st.session_state['main_features']: input_data['Water_Level_lag7'] = df['Water_Level_m'].iloc[-7]
-            if 'Rainfall_lag1' in st.session_state['main_features']: input_data['Rainfall_lag1'] = df['Rainfall_mm'].iloc[-1]
+            # Add time features
+            input_data.update({
+                'Year': pred_date.year, 
+                'Month': pred_date.month, 
+                'Day': pred_date.day, 
+                'DayOfYear': pred_date.timetuple().tm_yday
+            })
+            
+            # Add seasonal features if they exist in the model
+            if 'sin_month' in st.session_state['main_features']:
+                input_data['sin_month'] = np.sin(2 * np.pi * pred_date.month / 12)
+            if 'cos_month' in st.session_state['main_features']:
+                input_data['cos_month'] = np.cos(2 * np.pi * pred_date.month / 12)
+            if 'sin_day' in st.session_state['main_features']:
+                input_data['sin_day'] = np.sin(2 * np.pi * pred_date.timetuple().tm_yday / 365)
+            if 'cos_day' in st.session_state['main_features']:
+                input_data['cos_day'] = np.cos(2 * np.pi * pred_date.timetuple().tm_yday / 365)
 
             pred_df = pd.DataFrame([input_data])[st.session_state['main_features']]
             prediction_value = st.session_state['main_model'].predict(st.session_state['main_scaler'].transform(pred_df))[0]
@@ -290,6 +375,10 @@ with tab_main:
             
             st.success(f"Predicted Water Level for {pred_date}: **{prediction_value:.3f} m**")
             st.metric(label="Predicted Status", value=status)
+            
+            # Add uncertainty estimate
+            rmse = st.session_state['main_model_results']['rmse_test']
+            st.info(f"Prediction uncertainty (±1 RMSE): ±{rmse:.3f} m")
     else:
         st.info("Train a model first to make predictions.")
 
@@ -323,41 +412,59 @@ with tab_location:
     if st.button("1) Train Forecast Model"):
         with st.spinner("Training location-aware Random Forest model for forecasting..."):
             
-            df['Latitude'] = 20.5937
-            df['Longitude'] = 78.9629
+            # Add a base location to the original dataframe for training
+            df_loc = df.copy()
+            df_loc['Latitude'] = 20.5937 
+            df_loc['Longitude'] = 78.9629
 
-            # Define feature groups
+            # Use only safe features for forecasting
             loc_features = ['Latitude', 'Longitude']
-            time_weather_features = ['Temperature_C', 'Rainfall_mm', 'Year', 'Month', 'DayOfYear']
-            forecast_features = time_weather_features + loc_features
+            time_weather_features = ['Temperature_C', 'Rainfall_mm', 'Year', 'Month', 'DayOfYear', 'sin_month', 'cos_month']
+            forecast_features = [f for f in time_weather_features + loc_features if f in df_loc.columns]
             
-            X_all, y_all = df[forecast_features], df['Water_Level_m']
-            X_train, X_test, y_train, y_test = train_test_split(X_all, y_all, test_size=0.2, random_state=42)
+            X_all, y_all = df_loc[forecast_features], df_loc['Water_Level_m']
             
-            # FIX: Scale only weather/time features, not location features
-            scaler = StandardScaler().fit(X_train[time_weather_features])
+            # Use time series split for forecast model
+            split_idx = int(len(X_all) * 0.8)
+            X_train, X_test = X_all.iloc[:split_idx], X_all.iloc[split_idx:]
+            y_train, y_test = y_all.iloc[:split_idx], y_all.iloc[split_idx:]
             
-            X_train_scaled_weather = scaler.transform(X_train[time_weather_features])
+            # Scale only weather/time features, not location features
+            weather_time_cols = [f for f in time_weather_features if f in df_loc.columns]
+            scaler = StandardScaler()
+            
+            X_train_scaled_weather = scaler.fit_transform(X_train[weather_time_cols])
             X_train_final = np.hstack([X_train_scaled_weather, X_train[loc_features].values])
             
-            model = RandomForestRegressor(n_estimators=100, random_state=42, n_jobs=-1)
+            # Reduced model complexity
+            model = RandomForestRegressor(n_estimators=50, max_depth=10, min_samples_split=5, random_state=42, n_jobs=-1)
             model.fit(X_train_final, y_train)
             
-            st.session_state.update({'forecast_model': model, 'forecast_scaler': scaler, 'forecast_features': forecast_features, 'time_weather_features': time_weather_features, 'loc_features': loc_features})
+            st.session_state.update({
+                'forecast_model': model, 
+                'forecast_scaler': scaler, 
+                'weather_time_features': weather_time_cols, 
+                'loc_features': loc_features
+            })
 
-            # For evaluation, scale test data similarly
-            X_test_scaled_weather = scaler.transform(X_test[time_weather_features])
+            # Evaluate the forecast model
+            X_test_scaled_weather = scaler.transform(X_test[weather_time_cols])
             X_test_final = np.hstack([X_test_scaled_weather, X_test[loc_features].values])
             ypred = model.predict(X_test_final)
 
             r2, rmse = r2_score(y_test, ypred), np.sqrt(mean_squared_error(y_test, ypred))
-            st.success(f"Location-Aware Forecast Model trained — Test R2: {r2:.3f}, RMSE: {rmse:.3f}")
+            st.success(f"Location-Aware Forecast Model trained — Test R²: {r2:.3f}, RMSE: {rmse:.3f}")
+            
+            if r2 > 0.95:
+                st.warning("⚠️ Very high R² score detected. This may indicate overfitting or data leakage.")
 
     st.markdown("---")
     st.subheader("2) Generate 7-Day Groundwater Forecast")
     if st.button("Fetch 7-Day Forecast & Predict"):
-        if sel_lat is None: st.error("Select a location first.")
-        elif 'forecast_model' not in st.session_state: st.error("Train the forecast model first (Button 1).")
+        if sel_lat is None: 
+            st.error("Select a location first.")
+        elif 'forecast_model' not in st.session_state: 
+            st.error("Train the forecast model first (Button 1).")
         else:
             try:
                 with st.spinner("Fetching 7-day forecast..."):
@@ -369,11 +476,17 @@ with tab_location:
                         forecast_df['Latitude'] = sel_lat
                         forecast_df['Longitude'] = sel_lon
                         
-                        # FIX: Apply the same scaling transformation as in training
-                        time_weather_features = st.session_state['time_weather_features']
+                        # Add seasonal features
+                        forecast_df['sin_month'] = np.sin(2 * np.pi * forecast_df['Month'] / 12)
+                        forecast_df['cos_month'] = np.cos(2 * np.pi * forecast_df['Month'] / 12)
+                        
+                        # Apply the same scaling transformation as in training
+                        weather_time_features = st.session_state['weather_time_features']
                         loc_features = st.session_state['loc_features']
                         
-                        X_pred_scaled_weather = st.session_state['forecast_scaler'].transform(forecast_df[time_weather_features])
+                        available_weather_features = [f for f in weather_time_features if f in forecast_df.columns]
+                        
+                        X_pred_scaled_weather = st.session_state['forecast_scaler'].transform(forecast_df[available_weather_features])
                         X_pred_final = np.hstack([X_pred_scaled_weather, forecast_df[loc_features].values])
                         
                         predictions = st.session_state['forecast_model'].predict(X_pred_final)
@@ -387,3 +500,4 @@ with tab_location:
                         st.plotly_chart(fig7, use_container_width=True)
             except Exception as e:
                 st.error(f"An error occurred during forecast: {e}")
+
